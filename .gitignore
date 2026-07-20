@@ -3,3 +3,8 @@
 
 .env.local
 .vercel
+
+node_modules/
+.env.local
+.vercel/
+dist/
