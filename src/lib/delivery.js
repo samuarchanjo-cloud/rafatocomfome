@@ -13,7 +13,7 @@ export function distanceInKm(origin, destination) {
 
 export function evaluateDelivery(distance, ranges, settings) {
   if (!Number.isFinite(distance)) {
-    return { allowed: false, fee: 0, code: "LOCATION_REQUIRED", message: "Use sua localização para calcular a entrega." };
+    return { allowed: false, fee: 0, code: "LOCATION_REQUIRED", message: "Valide o endereço para calcular a entrega." };
   }
 
   const roundedDistance = Math.round(distance * 100) / 100;
@@ -45,7 +45,7 @@ export function evaluateDelivery(distance, ranges, settings) {
   if (!range) {
     return { allowed: false, fee: 0, code: "NO_FEE_RANGE", message: "Não há uma faixa de entrega configurada para esta distância." };
   }
-  return { allowed: true, fee: Number(range.fee) || 0, code: "RANGE", range, message: "Entrega disponível para sua localização." };
+  return { allowed: true, fee: Number(range.fee) || 0, code: "RANGE", range, message: "Entrega disponível para o endereço informado." };
 }
 
 export function validateDeliveryRanges(ranges) {
