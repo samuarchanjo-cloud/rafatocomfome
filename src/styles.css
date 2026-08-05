@@ -687,6 +687,10 @@ textarea {
   color: #6ef1a0;
 }
 
+.address-helper.warning {
+  color: var(--yellow-light);
+}
+
 .address-helper.error {
   color: #ffaaa2;
 }

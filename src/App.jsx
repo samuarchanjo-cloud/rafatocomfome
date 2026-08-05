@@ -42,7 +42,7 @@ import {
 } from "./lib/api";
 
 const STORAGE_KEY = "rafa-cart";
-const DELIVERY_ADDRESS_FIELDS = new Set(["postalCode", "street", "number", "complement", "neighborhood", "city", "state"]);
+const DELIVERY_ADDRESS_FIELDS = new Set(["postalCode", "street", "number", "complement", "neighborhood", "city", "state", "reference"]);
 const EMPTY_STORE = {
   products: [],
   categories: FALLBACK_CATEGORIES,
@@ -329,7 +329,9 @@ function App() {
       }
       const km = distanceInKm(storeCoordinates, coordinates);
       setDeliveryLocation({ ...coordinates, km });
-      setAddressValidationStatus({ type: "success", message: "Endereço validado com sucesso." });
+      setAddressValidationStatus(coordinates.precision === "approximate"
+        ? { type: "warning", message: "Endereço localizado aproximadamente. Confira os dados antes de finalizar." }
+        : { type: "success", message: "Endereço validado com sucesso." });
     } catch (error) {
       if (error.name === "AbortError") return;
       setAddressValidationStatus({
@@ -498,6 +500,7 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
       <div className="address-row"><label>Cidade<input required autoComplete="address-level2" value={checkout.city} onChange={(event) => setCheckoutField("city", event.target.value)} /></label><label>Estado<input required autoComplete="address-level1" value={checkout.state} onChange={(event) => setCheckoutField("state", event.target.value)} /></label></div>
       <label>Ponto de referência<input value={checkout.reference} onChange={(event) => setCheckoutField("reference", event.target.value)} /></label>
       <div className="location-tools"><button type="button" onClick={validateDeliveryAddress} disabled={validatingAddress || postalCodeStatus.type === "loading"}><MapPin size={17} />{validatingAddress ? "Validando endereço..." : "Validar endereço e calcular entrega"}</button><small>Geocodificação © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap contributors</a></small></div>
+      {addressValidationStatus.type === "warning" && <small className="address-helper warning">{addressValidationStatus.message}</small>}
       {deliveryLocation && <LocationStatusCard distanceKm={deliveryLocation.km} assessment={deliveryAssessment} />}
     </>}
     <div className="option-group"><span>Forma de pagamento</span><div className="payment-list"><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "pix"} label="Pix" onClick={() => setCheckoutField("payment", "pix")} /><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "dinheiro"} label="Dinheiro" onClick={() => setCheckoutField("payment", "dinheiro")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "credito"} label="Cartão de crédito" onClick={() => setCheckoutField("payment", "credito")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "debito"} label="Cartão de débito" onClick={() => setCheckoutField("payment", "debito")} /></div></div>
