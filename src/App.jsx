@@ -252,7 +252,7 @@ function App() {
   const subtotal = cartLines.reduce((sum, item) => sum + item.lineTotal, 0);
   const deliveryAssessment = checkout.deliveryType === "retirada"
     ? { allowed: true, fee: 0, code: "PICKUP", message: "Retirada no local." }
-    : evaluateDelivery(deliveryLocation?.km, store.deliveryRanges, store.settings);
+    : evaluateDelivery(deliveryLocation?.km, store.deliveryRanges, store.settings, deliveryLocation?.precision || "exact");
   const deliveryFee = deliveryAssessment.allowed ? deliveryAssessment.fee : 0;
   const isCardPayment = ["credito", "debito"].includes(checkout.payment);
   const cardFee = isCardPayment ? (subtotal + deliveryFee) * (Number(store.settings.card_fee_percent) || 0) / 100 : 0;
@@ -328,12 +328,44 @@ function App() {
         throw new Error("A localização do estabelecimento não está configurada corretamente.");
       }
       const km = distanceInKm(storeCoordinates, coordinates);
+      if (import.meta.env.DEV) {
+        console.debug("[delivery-geocoding]", {
+          source: coordinates.source,
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude,
+          precision: coordinates.precision,
+          postalCode: coordinates.postalCode,
+          type: coordinates.type,
+          addresstype: coordinates.addresstype,
+          distanceKm: km,
+        });
+      }
       setDeliveryLocation({ ...coordinates, km });
       setAddressValidationStatus(coordinates.precision === "approximate"
-        ? { type: "warning", message: "Endereço localizado aproximadamente. Confira os dados antes de finalizar." }
+        ? { type: "warning", message: "Localização apenas aproximada. Revise CEP, rua e número e tente validar novamente." }
         : { type: "success", message: "Endereço validado com sucesso." });
     } catch (error) {
       if (error.name === "AbortError") return;
+      if (import.meta.env.DEV && error.precision === "ambiguous") {
+        const storeCoordinates = {
+          latitude: Number(store.settings.store_latitude),
+          longitude: Number(store.settings.store_longitude),
+        };
+        console.debug("[delivery-geocoding]", {
+          source: "ambiguous",
+          precision: error.precision,
+          differenceKm: error.differenceKm,
+          alternatives: (error.sources || []).map((source) => ({
+            source: source.source,
+            latitude: source.latitude,
+            longitude: source.longitude,
+            postalCode: source.postalCode,
+            type: source.type,
+            addresstype: source.addresstype,
+            distanceKm: distanceInKm(storeCoordinates, source),
+          })),
+        });
+      }
       setAddressValidationStatus({
         type: "error",
         message: error.message || "Não foi possível validar o endereço. Revise os dados e tente novamente.",

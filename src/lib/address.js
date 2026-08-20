@@ -2,6 +2,7 @@ const VIA_CEP_ENDPOINT = "https://viacep.com.br/ws";
 const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 const AWESOME_CEP_ENDPOINT = "https://cep.awesomeapi.com.br/json";
 const NOMINATIM_REQUEST_INTERVAL_MS = 1_000;
+const GEOCODING_AGREEMENT_TOLERANCE_KM = 1;
 
 const postalCodeCache = new Map();
 const geocodingCache = new Map();
@@ -38,8 +39,26 @@ const BRAZILIAN_STATES = {
   TO: "Tocantins",
 };
 
-function addressError(code, message) {
-  return Object.assign(new Error(message), { code });
+function addressError(code, message, details = {}) {
+  return Object.assign(new Error(message), { code, ...details });
+}
+
+function isDevelopmentEnvironment() {
+  return Boolean(import.meta.env?.DEV) || (typeof process !== "undefined" && process.env?.NODE_ENV === "development");
+}
+
+function logGeocoding(source, result, extra = {}) {
+  if (!isDevelopmentEnvironment()) return;
+  console.debug("[delivery-geocoding]", {
+    source,
+    latitude: result?.latitude ?? null,
+    longitude: result?.longitude ?? null,
+    precision: result?.precision ?? null,
+    postalCode: result?.postalCode ?? null,
+    type: result?.type ?? null,
+    addresstype: result?.addresstype ?? null,
+    ...extra,
+  });
 }
 
 function normalizeText(value) {
@@ -68,6 +87,48 @@ function matchesStreet(expected, actual) {
       normalizedExpected.includes(normalizedActual) ||
       normalizedActual.includes(normalizedExpected)),
   );
+}
+
+function candidateMetadata(candidate) {
+  return {
+    postalCode: formatPostalCode(candidate?.address?.postcode || ""),
+    type: candidate?.type || null,
+    addresstype: candidate?.addresstype || null,
+    placeRank: Number.isFinite(Number(candidate?.place_rank)) ? Number(candidate.place_rank) : null,
+  };
+}
+
+function isHouseLevelCandidate(candidate) {
+  const type = normalizeText(candidate?.type);
+  const addresstype = normalizeText(candidate?.addresstype);
+  const placeRank = Number(candidate?.place_rank);
+  if ([type, addresstype].some((value) => ["road", "street"].includes(value))) return false;
+  return !Number.isFinite(placeRank) || placeRank >= 28;
+}
+
+function isRoadLevelCandidate(candidate) {
+  const category = normalizeText(candidate?.category || candidate?.class);
+  const type = normalizeText(candidate?.type);
+  const addresstype = normalizeText(candidate?.addresstype);
+  const placeRank = Number(candidate?.place_rank);
+  const roadLike =
+    category === "highway" ||
+    ["road", "street"].includes(addresstype) ||
+    ["residential", "living street", "service", "unclassified", "tertiary", "secondary", "primary"].includes(type);
+  return roadLike && (!Number.isFinite(placeRank) || placeRank >= 26);
+}
+
+function distanceBetweenCoordinatesKm(first, second) {
+  const earthRadiusKm = 6371;
+  const toRad = (value) => (value * Math.PI) / 180;
+  const latitudeDifference = toRad(second.latitude - first.latitude);
+  const longitudeDifference = toRad(second.longitude - first.longitude);
+  const firstLatitude = toRad(first.latitude);
+  const secondLatitude = toRad(second.latitude);
+  const a =
+    Math.sin(latitudeDifference / 2) ** 2 +
+    Math.cos(firstLatitude) * Math.cos(secondLatitude) * Math.sin(longitudeDifference / 2) ** 2;
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function matchesCity(expected, details) {
@@ -111,6 +172,7 @@ function isPreciseAddressCandidate(candidate, address) {
     Number.isFinite(longitude) &&
     details.country_code === "br" &&
     normalizeText(details.house_number) === normalizeText(address.number) &&
+    isHouseLevelCandidate(candidate) &&
     matchesStreet(address.street, returnedStreet) &&
     matchesCity(address.city, details) &&
     matchesState(address.state, details) &&
@@ -131,8 +193,7 @@ function isPostalAddressCompatible(address, postalAddress) {
 function isCompatibleApproximatePostalCode(expected, returned) {
   const expectedDigits = postalCodeDigits(expected);
   const returnedDigits = postalCodeDigits(returned);
-  if (!returnedDigits) return true;
-  return returnedDigits === expectedDigits || returnedDigits.slice(0, 5) === expectedDigits.slice(0, 5);
+  return Boolean(returnedDigits && returnedDigits === expectedDigits);
 }
 
 function isApproximateAddressCandidate(candidate, address) {
@@ -148,6 +209,7 @@ function isApproximateAddressCandidate(candidate, address) {
     Number.isFinite(longitude) &&
     details.country_code === "br" &&
     isCompatibleApproximatePostalCode(expectedPostalCode, returnedPostalCode) &&
+    isRoadLevelCandidate(candidate) &&
     matchesStreet(address.street, returnedStreet) &&
     matchesCity(address.city, details) &&
     matchesState(address.state, details)
@@ -167,11 +229,14 @@ function geocodingParameters(query) {
 }
 
 function coordinatesFromCandidate(candidate, precision) {
+  const metadata = candidateMetadata(candidate);
   return {
     latitude: Number(candidate.lat),
     longitude: Number(candidate.lon),
     displayName: candidate.display_name,
     precision,
+    source: precision === "exact" ? "nominatim_exact" : "nominatim_approximate",
+    ...metadata,
   };
 }
 
@@ -259,15 +324,24 @@ async function lookupPostalCoordinates(address, signal) {
     });
   } catch (error) {
     if (error.name === "AbortError") throw error;
-    return null;
+    throw addressError("GEOCODING_UNAVAILABLE", "O serviço de coordenadas por CEP está temporariamente indisponível.", {
+      service: "awesomeapi_cep",
+    });
   }
-  if (!response.ok) return null;
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    throw addressError("GEOCODING_UNAVAILABLE", "O serviço de coordenadas por CEP está temporariamente indisponível.", {
+      service: "awesomeapi_cep",
+    });
+  }
 
   let data;
   try {
     data = await response.json();
   } catch {
-    return null;
+    throw addressError("GEOCODING_UNAVAILABLE", "O serviço de coordenadas por CEP retornou uma resposta inválida.", {
+      service: "awesomeapi_cep",
+    });
   }
 
   const latitude = Number(data.lat);
@@ -286,9 +360,41 @@ async function lookupPostalCoordinates(address, signal) {
     longitude,
     displayName: [data.address, data.district, data.city, data.state, formatPostalCode(data.cep)].filter(Boolean).join(", "),
     precision: "approximate",
+    source: "awesomeapi_cep",
+    postalCode: formatPostalCode(data.cep),
+    type: data.address_type || "postcode",
+    addresstype: "postcode",
+    placeRank: null,
   };
   postalCoordinatesCache.set(postalCode, result);
   return result;
+}
+
+function chooseApproximateCoordinates(nominatimResult, postalResult) {
+  if (nominatimResult && postalResult) {
+    const differenceKm = distanceBetweenCoordinatesKm(nominatimResult, postalResult);
+    if (differenceKm > GEOCODING_AGREEMENT_TOLERANCE_KM) {
+      const sources = [nominatimResult, postalResult];
+      logGeocoding("ambiguous", null, { precision: "ambiguous", differenceKm, sources });
+      throw addressError(
+        "ADDRESS_AMBIGUOUS",
+        "Não foi possível confirmar precisamente a localização. Revise o endereço e tente novamente.",
+        { precision: "ambiguous", sources, differenceKm },
+      );
+    }
+
+    const result = {
+      ...postalResult,
+      agreementDistanceKm: differenceKm,
+      alternatives: [nominatimResult, postalResult],
+    };
+    logGeocoding("awesomeapi_cep", result, { agreementDistanceKm: differenceKm });
+    return result;
+  }
+
+  const result = postalResult || nominatimResult;
+  if (result) logGeocoding(result.source, result);
+  return result || null;
 }
 
 export function postalCodeDigits(value) {
@@ -382,16 +488,26 @@ export async function geocodeDeliveryAddress(address, { signal } = {}) {
     "Brasil",
   ].join(", ");
   const preciseCacheKey = `precise:${normalizeText(preciseQuery)}`;
-  if (geocodingCache.has(preciseCacheKey)) return geocodingCache.get(preciseCacheKey);
+  const cachedPreciseResult = geocodingCache.get(preciseCacheKey);
+  if (cachedPreciseResult?.precision === "exact") return cachedPreciseResult;
 
-  await waitForNominatimRateLimit();
-  const preciseCandidates = await requestNominatimCandidates(geocodingParameters(preciseQuery), signal);
-  const preciseCandidate = Array.isArray(preciseCandidates)
-    ? preciseCandidates.find((candidate) => isPreciseAddressCandidate(candidate, address))
-    : null;
+  let nominatimUnavailableError = null;
+  let preciseCandidate = null;
+  try {
+    await waitForNominatimRateLimit();
+    const preciseCandidates = await requestNominatimCandidates(geocodingParameters(preciseQuery), signal);
+    preciseCandidate = Array.isArray(preciseCandidates)
+      ? preciseCandidates.find((candidate) => isPreciseAddressCandidate(candidate, address))
+      : null;
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    if (error.code !== "GEOCODING_UNAVAILABLE") throw error;
+    nominatimUnavailableError = error;
+  }
   if (preciseCandidate) {
     const preciseResult = coordinatesFromCandidate(preciseCandidate, "exact");
     geocodingCache.set(preciseCacheKey, preciseResult);
+    logGeocoding("nominatim_exact", preciseResult);
     return preciseResult;
   }
 
@@ -402,32 +518,53 @@ export async function geocodeDeliveryAddress(address, { signal } = {}) {
     formatPostalCode(address.postalCode),
     "Brasil",
   ].join(", ");
-  const approximateCacheKey = `approximate:${normalizeText(approximateQuery)}`;
-  let approximateResult = geocodingCache.get(approximateCacheKey);
+  const approximateCacheKey = `nominatim-approximate:${normalizeText(approximateQuery)}`;
+  let nominatimApproximateResult = geocodingCache.get(approximateCacheKey) || null;
 
-  if (!approximateResult) {
-    await waitForNominatimRateLimit();
-    const approximateCandidates = await requestNominatimCandidates(geocodingParameters(approximateQuery), signal);
-    const approximateCandidate = Array.isArray(approximateCandidates)
-      ? approximateCandidates.find((candidate) => isApproximateAddressCandidate(candidate, address))
-      : null;
-    if (approximateCandidate) {
-      approximateResult = coordinatesFromCandidate(approximateCandidate, "approximate");
-      geocodingCache.set(approximateCacheKey, approximateResult);
+  if (!nominatimApproximateResult && !nominatimUnavailableError) {
+    try {
+      await waitForNominatimRateLimit();
+      const approximateCandidates = await requestNominatimCandidates(geocodingParameters(approximateQuery), signal);
+      const approximateCandidate = Array.isArray(approximateCandidates)
+        ? approximateCandidates.find((candidate) => isApproximateAddressCandidate(candidate, address))
+        : null;
+      if (approximateCandidate) {
+        nominatimApproximateResult = coordinatesFromCandidate(approximateCandidate, "approximate");
+        geocodingCache.set(approximateCacheKey, nominatimApproximateResult);
+      }
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      if (error.code !== "GEOCODING_UNAVAILABLE") throw error;
+      nominatimUnavailableError = error;
     }
   }
 
-  if (!approximateResult) {
-    approximateResult = await lookupPostalCoordinates(address, signal);
-    if (!approximateResult) {
-      throw addressError(
-        "ADDRESS_NOT_PRECISE",
-        "O endereço não pôde ser localizado. Revise CEP, rua, bairro, cidade e estado.",
-      );
-    }
-    geocodingCache.set(approximateCacheKey, approximateResult);
+  let postalResult = null;
+  let postalServiceUnavailableError = null;
+  try {
+    postalResult = await lookupPostalCoordinates(address, signal);
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    if (error.code !== "GEOCODING_UNAVAILABLE") throw error;
+    postalServiceUnavailableError = error;
   }
 
-  geocodingCache.set(preciseCacheKey, approximateResult);
-  return approximateResult;
+  const approximateResult = chooseApproximateCoordinates(nominatimApproximateResult, postalResult);
+  if (approximateResult) return approximateResult;
+
+  if (nominatimUnavailableError || postalServiceUnavailableError) {
+    throw addressError(
+      "GEOCODING_UNAVAILABLE",
+      "Não foi possível consultar todos os serviços de localização agora. Tente novamente em instantes.",
+      {
+        services: [nominatimUnavailableError?.service || "nominatim", postalServiceUnavailableError?.service]
+          .filter(Boolean),
+      },
+    );
+  }
+
+  throw addressError(
+    "ADDRESS_NOT_PRECISE",
+    "O endereço não pôde ser localizado. Revise CEP, rua, número, bairro, cidade e estado.",
+  );
 }

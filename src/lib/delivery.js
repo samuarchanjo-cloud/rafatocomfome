@@ -11,7 +11,16 @@ export function distanceInKm(origin, destination) {
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-export function evaluateDelivery(distance, ranges, settings) {
+export function evaluateDelivery(distance, ranges, settings, precision = "exact") {
+  if (precision !== "exact") {
+    return {
+      allowed: false,
+      fee: 0,
+      code: precision === "ambiguous" ? "ADDRESS_AMBIGUOUS" : "ADDRESS_NOT_PRECISE",
+      message: "Não foi possível confirmar precisamente a localização. Revise o endereço e tente novamente.",
+    };
+  }
+
   if (!Number.isFinite(distance)) {
     return { allowed: false, fee: 0, code: "LOCATION_REQUIRED", message: "Valide o endereço para calcular a entrega." };
   }
