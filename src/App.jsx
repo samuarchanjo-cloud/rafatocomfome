@@ -29,11 +29,13 @@ import {
 } from "./lib/address";
 import { getBusinessStatus } from "./lib/businessHours";
 import { distanceInKm, effectiveDeliveryDistance, evaluateOrderDelivery } from "./lib/delivery";
-import { locateDeliveryAddress, mapCandidateFromError } from "./lib/geocodingProvider";
+import { locateDeliveryAddress } from "./lib/geocodingProvider";
 import { isTrustedDeliveryLocation, requestDeviceGps } from "./lib/location";
 import { createMapPinLocation, isValidCoordinatePair } from "./lib/mapLocation";
+import { createPostalZoneLocation } from "./lib/postalZone";
 import {
   checkIsAdmin,
+  findDeliveryPostalZone,
   getSession,
   loadStoreData,
   onAuthChange,
@@ -95,6 +97,7 @@ function friendlyOrderError(error) {
   if (message.includes("INVALID_LOCATION_SOURCE")) return "Confirme o local de entrega antes de finalizar.";
   if (message.includes("INVALID_LOCATION_ACCURACY")) return "A localização do aparelho não teve precisão suficiente. Tente novamente.";
   if (message.includes("INVALID_LOCATION_UNCERTAINTY")) return "Não foi possível validar este endereço. Revise os dados e tente novamente.";
+  if (message.includes("DELIVERY_ZONE_NOT_FOUND")) return "Este endereço ainda não está disponível para cálculo automático de entrega.";
   if (message.includes("MAP_PIN_CONFIRMATION_REQUIRED")) return "Confirme o local de entrega no mapa antes de finalizar.";
   if (message.includes("ADDRESS_REQUIRES_CONFIRMATION")) return "Não conseguimos confirmar com segurança se este endereço está dentro da área de entrega.";
   if (message.includes("OUTSIDE_DELIVERY_AREA")) return "Este endereço está fora da nossa área de entrega.";
@@ -139,7 +142,6 @@ function App() {
   const [postalCodeStatus, setPostalCodeStatus] = useState({ type: "idle", message: "" });
   const [addressValidationStatus, setAddressValidationStatus] = useState({ type: "idle", message: "" });
   const [validatingAddress, setValidatingAddress] = useState(false);
-  const [gpsAddressConfirmed, setGpsAddressConfirmed] = useState(false);
   const [requestingGps, setRequestingGps] = useState(false);
   const [mapPicker, setMapPicker] = useState(null);
   const [pixCopyStatus, setPixCopyStatus] = useState("");
@@ -243,7 +245,6 @@ function App() {
         setMapPicker(null);
         gpsRequestIdRef.current += 1;
         setRequestingGps(false);
-        setGpsAddressConfirmed(false);
         setAddressValidationStatus({ type: "idle", message: "" });
         setPostalCodeStatus({ type: "success", message: "CEP encontrado. Confira e complete o endereço." });
       })
@@ -316,7 +317,6 @@ function App() {
       setDeliveryLocation(null);
       setMapPicker(null);
       setRequestingGps(false);
-      setGpsAddressConfirmed(false);
       setAddressValidationStatus({ type: "idle", message: "" });
     }
     setCheckout((current) => {
@@ -382,32 +382,45 @@ function App() {
     geocodingAbortRef.current = controller;
     setDeliveryLocation(null);
     setMapPicker(null);
-    setGpsAddressConfirmed(false);
     setValidatingAddress(true);
     setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
     try {
-      const coordinates = await locateDeliveryAddress(checkout, {
-        signal: controller.signal,
-        storeCoordinates: {
-          latitude: Number(store.settings.store_latitude),
-          longitude: Number(store.settings.store_longitude),
-        },
-      });
+      const coordinates = await locateDeliveryAddress(checkout, { signal: controller.signal });
       if (!isTrustedDeliveryLocation(coordinates)) {
-        if (!openMapPicker(coordinates)) {
-          setAddressValidationStatus({ type: "needs-gps", message: "Não encontramos a região do endereço. Revise os dados ou use sua localização atual." });
-        }
+        setAddressValidationStatus({ type: "error", message: "O endereço não pôde ser localizado com precisão." });
         return;
       }
       acceptResolvedLocation(coordinates);
     } catch (error) {
       if (error.name === "AbortError") return;
-      const candidate = mapCandidateFromError(error);
-      if (["ADDRESS_NOT_PRECISE", "ADDRESS_AMBIGUOUS", "GEOCODING_UNAVAILABLE"].includes(error.code) && openMapPicker(candidate)) return;
-      const canUseDeviceGps = ["ADDRESS_NOT_PRECISE", "ADDRESS_AMBIGUOUS", "GEOCODING_UNAVAILABLE"].includes(error.code);
-      setAddressValidationStatus(canUseDeviceGps
-        ? { type: "needs-gps", message: "Não encontramos a região do endereço. Revise os dados ou use sua localização atual." }
-        : { type: "error", message: error.message || "Não foi possível validar o endereço. Revise os dados e tente novamente." });
+      if (error.code === "ADDRESS_NOT_PRECISE") {
+        try {
+          setAddressValidationStatus({ type: "loading", message: "Verificando disponibilidade da entrega..." });
+          const zone = await findDeliveryPostalZone(checkout.postalCode, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          const location = createPostalZoneLocation(zone, checkout.postalCode);
+          if (location) {
+            setDeliveryLocation(location);
+            setAddressValidationStatus({ type: "success", message: "Entrega disponível para o endereço informado." });
+          } else {
+            setAddressValidationStatus({
+              type: "needs-gps",
+              message: "Não conseguimos validar automaticamente este endereço.",
+            });
+          }
+        } catch (zoneError) {
+          if (zoneError.name === "AbortError") return;
+          setAddressValidationStatus({
+            type: "error",
+            message: "Não foi possível verificar a disponibilidade para este CEP agora. Tente novamente.",
+          });
+        }
+        return;
+      }
+      setAddressValidationStatus({
+        type: "error",
+        message: error.message || "Não foi possível validar o endereço. Revise os dados e tente novamente.",
+      });
     } finally {
       if (geocodingAbortRef.current === controller) {
         geocodingAbortRef.current = null;
@@ -438,10 +451,17 @@ function App() {
 
   async function useDeviceLocation() {
     try {
-      await requestAndAcceptDeviceLocation(gpsAddressConfirmed);
+      await requestAndAcceptDeviceLocation(true);
     } catch (error) {
       setAddressValidationStatus({ type: "gps-error", message: error.message || "Não foi possível obter sua localização atual." });
     }
+  }
+
+  function declineDeviceLocation() {
+    setAddressValidationStatus({
+      type: "unavailable",
+      message: "Este endereço ainda não está disponível para cálculo automático de entrega.",
+    });
   }
 
   async function useDeviceLocationFromMap() {
@@ -476,7 +496,6 @@ function App() {
     setDeliveryLocation(null);
     setMapPicker(null);
     setRequestingGps(false);
-    setGpsAddressConfirmed(false);
     setAddressValidationStatus({ type: "idle", message: "" });
     window.setTimeout(() => document.getElementById("delivery-number")?.focus(), 0);
   }
@@ -502,7 +521,7 @@ function App() {
       `👤 ${checkout.name}`,
       `📞 ${checkout.phone}`,
       `📍 ${checkout.deliveryType === "retirada" ? "Retirada no local" : composeDeliveryAddress(checkout)}`,
-      checkout.deliveryType === "entrega" ? `Distância: ${Number(order.distance_km).toFixed(2)} km` : "",
+      checkout.deliveryType === "entrega" && order.distance_km != null ? `Distância: ${Number(order.distance_km).toFixed(2)} km` : "",
       "🛒 Itens",
       itemLines,
       `Subtotal: ${money(order.subtotal)}`,
@@ -546,6 +565,7 @@ function App() {
         latitude: checkout.deliveryType === "entrega" ? deliveryLocation?.latitude : null,
         longitude: checkout.deliveryType === "entrega" ? deliveryLocation?.longitude : null,
         location_source: checkout.deliveryType === "entrega" ? deliveryLocation?.source : null,
+        postal_code: checkout.deliveryType === "entrega" ? postalCodeDigits(checkout.postalCode) : null,
         location_accuracy_m: checkout.deliveryType === "entrega" && deliveryLocation?.source === "device_gps"
           ? deliveryLocation.accuracy
           : null,
@@ -595,7 +615,7 @@ function App() {
 
         {!search.trim() && view === "cart" && <CartView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} status={status} onQty={updateQty} onRemove={(id) => setCart((current) => current.filter((item) => item.id !== id))} onCheckout={() => status.open ? setView("checkout") : showNotice(`Estamos fechados. Próxima abertura: ${status.nextLabel}.`, "error")} onBack={() => setView("home")} />}
 
-        {!search.trim() && view === "checkout" && <CheckoutView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} setCheckoutField={setCheckoutField} finishOrder={finishOrder} deliveryLocation={deliveryLocation} deliveryAssessment={deliveryAssessment} postalCodeStatus={postalCodeStatus} addressValidationStatus={addressValidationStatus} validateDeliveryAddress={validateDeliveryAddress} validatingAddress={validatingAddress} gpsAddressConfirmed={gpsAddressConfirmed} setGpsAddressConfirmed={setGpsAddressConfirmed} useDeviceLocation={useDeviceLocation} requestingGps={requestingGps} reviewDeliveryAddress={reviewDeliveryAddress} changeDeliveryLocation={changeDeliveryLocation} pixCopyStatus={pixCopyStatus} copyPixKey={copyPixKey} status={status} settings={store.settings} submitting={submittingOrder} onBack={() => setView("cart")} />}
+        {!search.trim() && view === "checkout" && <CheckoutView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} setCheckoutField={setCheckoutField} finishOrder={finishOrder} deliveryLocation={deliveryLocation} deliveryAssessment={deliveryAssessment} postalCodeStatus={postalCodeStatus} addressValidationStatus={addressValidationStatus} validateDeliveryAddress={validateDeliveryAddress} validatingAddress={validatingAddress} useDeviceLocation={useDeviceLocation} declineDeviceLocation={declineDeviceLocation} requestingGps={requestingGps} reviewDeliveryAddress={reviewDeliveryAddress} changeDeliveryLocation={changeDeliveryLocation} pixCopyStatus={pixCopyStatus} copyPixKey={copyPixKey} status={status} settings={store.settings} submitting={submittingOrder} onBack={() => setView("cart")} />}
 
         {!search.trim() && view === "admin" && (authLoading
           ? <p className="empty">Verificando sessão...</p>
@@ -630,13 +650,13 @@ function CartView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment, to
   return <section className="cart-view"><button className="back-button" onClick={onBack}><ArrowLeft size={18} />Continuar escolhendo</button><div className="section-title"><h1>Carrinho</h1><span>Confira os itens antes de finalizar</span></div>{cartLines.length ? <><div className="cart-list">{cartLines.map((item) => <article className="cart-item" key={item.id}><img src={item.product.image} alt={item.product.name} /><div><strong>{item.product.name}</strong><span>{money(item.product.price)} cada</span><div className="qty-row"><button onClick={() => onQty(item.id, -1)} aria-label="Diminuir"><Minus size={16} /></button><b>{item.qty}</b><button onClick={() => onQty(item.id, 1)} aria-label="Aumentar"><Plus size={16} /></button><button className="ghost-danger" onClick={() => onRemove(item.id)} aria-label="Remover"><Trash2 size={16} /></button></div></div><strong>{money(item.lineTotal)}</strong></article>)}</div><Totals subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} deliveryType={checkout.deliveryType} /><button className="primary-action" disabled={!status.open} onClick={onCheckout}>{status.open ? "Finalizar pedido" : "Fechado para pedidos"}</button>{!status.open && <p className="action-help">Próxima abertura: {status.nextLabel}.</p>}</> : <p className="empty">Seu carrinho está vazio.</p>}</section>;
 }
 
-function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment, total, checkout, setCheckoutField, finishOrder, deliveryLocation, deliveryAssessment, postalCodeStatus, addressValidationStatus, validateDeliveryAddress, validatingAddress, gpsAddressConfirmed, setGpsAddressConfirmed, useDeviceLocation, requestingGps, reviewDeliveryAddress, changeDeliveryLocation, pixCopyStatus, copyPixKey, status, settings, submitting, onBack }) {
+function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment, total, checkout, setCheckoutField, finishOrder, deliveryLocation, deliveryAssessment, postalCodeStatus, addressValidationStatus, validateDeliveryAddress, validatingAddress, useDeviceLocation, declineDeviceLocation, requestingGps, reviewDeliveryAddress, changeDeliveryLocation, pixCopyStatus, copyPixKey, status, settings, submitting, onBack }) {
   const needsAddress = checkout.deliveryType === "entrega";
   const blocked = !status.open || submitting || (needsAddress && !deliveryAssessment.allowed);
-  const deliveryErrorMessage = ["error", "needs-gps", "gps-error", "outside"].includes(addressValidationStatus.type)
+  const deliveryErrorMessage = ["error", "gps-error", "outside"].includes(addressValidationStatus.type)
     ? addressValidationStatus.message
     : deliveryAssessment.message;
-  const showDeliveryError = needsAddress && !deliveryAssessment.allowed && !deliveryLocation && ["error", "needs-gps", "gps-error"].includes(addressValidationStatus.type);
+  const showDeliveryError = needsAddress && !deliveryAssessment.allowed && !deliveryLocation && ["error", "gps-error"].includes(addressValidationStatus.type);
   return <section className="checkout-view"><button className="back-button" onClick={onBack}><ArrowLeft size={18} />Voltar ao carrinho</button><div className="section-title"><h1>Checkout</h1><span>Validado e enviado pelo WhatsApp</span></div><form className="checkout-form" onSubmit={finishOrder}>
     <div className="option-group"><span>Tipo de entrega</span><div className="segmented"><button type="button" className={needsAddress ? "selected" : ""} onClick={() => setCheckoutField("deliveryType", "entrega")}><Bike size={17} />Entrega</button><button type="button" className={!needsAddress ? "selected" : ""} onClick={() => setCheckoutField("deliveryType", "retirada")}><Store size={17} />Retirada</button></div></div>
     <div className="checkout-section"><h2>Seus dados</h2><label>Nome<input required autoComplete="name" value={checkout.name} onChange={(event) => setCheckoutField("name", event.target.value)} /></label><label>Telefone<input required inputMode="tel" autoComplete="tel" value={checkout.phone} onChange={(event) => setCheckoutField("phone", event.target.value)} /></label></div>
@@ -650,8 +670,9 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
         <label>Ponto de referência<input value={checkout.reference} onChange={(event) => setCheckoutField("reference", event.target.value)} /></label>
       </div>
       <div className="location-tools"><button type="button" onClick={validateDeliveryAddress} disabled={validatingAddress || requestingGps || postalCodeStatus.type === "loading"}><MapPin size={17} />{validatingAddress ? "Localizando endereço..." : "Localizar endereço e calcular entrega"}</button></div>
-      {addressValidationStatus.type === "needs-gps" && <GpsFallbackPanel title={addressValidationStatus.message} confirmed={gpsAddressConfirmed} onConfirm={setGpsAddressConfirmed} onUseLocation={useDeviceLocation} requesting={requestingGps} onReview={reviewDeliveryAddress} />}
-      {addressValidationStatus.type === "gps-error" && <><small className="address-helper error">{addressValidationStatus.message}</small><GpsFallbackPanel confirmed={gpsAddressConfirmed} onConfirm={setGpsAddressConfirmed} onUseLocation={useDeviceLocation} requesting={requestingGps} onReview={reviewDeliveryAddress} /></>}
+      {addressValidationStatus.type === "needs-gps" && <GpsFallbackPanel title={addressValidationStatus.message} onUseLocation={useDeviceLocation} onDecline={declineDeviceLocation} requesting={requestingGps} />}
+      {addressValidationStatus.type === "gps-error" && <><small className="address-helper error">{addressValidationStatus.message}</small><GpsFallbackPanel onUseLocation={useDeviceLocation} onDecline={declineDeviceLocation} requesting={requestingGps} /></>}
+      {addressValidationStatus.type === "unavailable" && <div className="gps-fallback-panel"><strong>{addressValidationStatus.message}</strong><button type="button" className="gps-review-button" onClick={reviewDeliveryAddress}>Revisar endereço</button></div>}
       {deliveryLocation && <LocationStatusCard location={deliveryLocation} assessment={deliveryAssessment} onChange={changeDeliveryLocation} />}
     </>}
     <div className="option-group"><span>Forma de pagamento</span><div className="payment-list"><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "pix"} label="Pix" onClick={() => setCheckoutField("payment", "pix")} /><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "dinheiro"} label="Dinheiro" onClick={() => setCheckoutField("payment", "dinheiro")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "credito"} label="Cartão de crédito" onClick={() => setCheckoutField("payment", "credito")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "debito"} label="Cartão de débito" onClick={() => setCheckoutField("payment", "debito")} /></div></div>
@@ -663,13 +684,12 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
   </form></section>;
 }
 
-function GpsFallbackPanel({ title = "Não conseguimos localizar este número com precisão.", confirmed, onConfirm, onUseLocation, requesting, onReview }) {
+function GpsFallbackPanel({ title = "Não conseguimos validar automaticamente este endereço.", onUseLocation, onDecline, requesting }) {
   return <div className="gps-fallback-panel">
     <strong>{title}</strong>
-    <label className="gps-confirmation"><input type="checkbox" checked={confirmed} onChange={(event) => onConfirm(event.target.checked)} />Estou no endereço de entrega</label>
-    <button type="button" className="gps-use-button" onClick={onUseLocation} disabled={!confirmed || requesting}><MapPin size={17} />{requesting ? "Obtendo localização..." : "Usar minha localização"}</button>
-    <small>Use esta opção somente se você estiver no endereço onde o pedido será entregue.</small>
-    <button type="button" className="gps-review-button" onClick={onReview}>Revisar endereço</button>
+    <p>Você está no endereço de entrega agora?</p>
+    <button type="button" className="gps-use-button" onClick={onUseLocation} disabled={requesting}><MapPin size={17} />{requesting ? "Obtendo localização..." : "Sim, usar minha localização"}</button>
+    <button type="button" className="gps-review-button" onClick={onDecline}>Não, revisar endereço</button>
   </div>;
 }
 
@@ -680,7 +700,7 @@ function LocationStatusCard({ location, assessment, onChange }) {
     : "Este endereço está fora da nossa área de entrega.";
   return <div className={`location-status-card ${assessment.allowed ? "success" : "warning"}`}>
     {assessment.allowed ? <CheckCircle2 size={24} /> : <TriangleAlert size={24} />}
-    <div><strong>{title}</strong>{assessment.allowed && <div className="location-fee"><span>Taxa de entrega</span><b>{money(assessment.fee)}</b></div>}<small>Distância: {location.km.toFixed(2)} km</small><button type="button" className="location-change-button" onClick={onChange}>{assessment.allowed && mapConfirmed ? "Alterar local" : "Alterar endereço"}</button></div>
+    <div><strong>{title}</strong>{assessment.allowed && <div className="location-fee"><span>Taxa de entrega</span><b>{money(assessment.fee)}</b></div>}{location.km != null && Number.isFinite(Number(location.km)) && <small>Distância: {Number(location.km).toFixed(2)} km</small>}<button type="button" className="location-change-button" onClick={onChange}>{assessment.allowed && mapConfirmed ? "Alterar local" : "Alterar endereço"}</button></div>
   </div>;
 }
 
@@ -703,7 +723,7 @@ function PaymentButton({ icon, active, label, onClick }) {
 }
 
 function Totals({ subtotal, deliveryFee, cardFee = 0, isCardPayment = false, total, deliveryType, deliveryDistance }) {
-  return <div className="totals">{deliveryDistance && deliveryType === "entrega" && <div className="distance-line"><span>Distância</span><strong>{deliveryDistance.km.toFixed(2)} km</strong></div>}<div><span>Subtotal</span><strong>{money(subtotal)}</strong></div><div><span>{deliveryType === "retirada" ? "Retirada" : "Taxa de entrega"}</span><strong>{money(deliveryFee)}</strong></div>{isCardPayment && <div><span>Taxa do cartão</span><strong>{money(cardFee)}</strong></div>}<div className="grand-total"><span>Total</span><strong>{money(total)}</strong></div></div>;
+  return <div className="totals">{deliveryDistance && deliveryType === "entrega" && deliveryDistance.km != null && Number.isFinite(Number(deliveryDistance.km)) && <div className="distance-line"><span>Distância</span><strong>{Number(deliveryDistance.km).toFixed(2)} km</strong></div>}<div><span>Subtotal</span><strong>{money(subtotal)}</strong></div><div><span>{deliveryType === "retirada" ? "Retirada" : "Taxa de entrega"}</span><strong>{money(deliveryFee)}</strong></div>{isCardPayment && <div><span>Taxa do cartão</span><strong>{money(cardFee)}</strong></div>}<div className="grand-total"><span>Total</span><strong>{money(total)}</strong></div></div>;
 }
 
 function AdminLogin({ showNotice }) {

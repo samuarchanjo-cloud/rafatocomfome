@@ -18,6 +18,15 @@ export function isTrustedDeliveryLocation(location) {
     return false;
   }
 
+  if (location.source === "postal_zone") {
+    return (
+      location.precision === "administrative" &&
+      /^\d{8}$/.test(String(location.postalCode || "")) &&
+      Number.isFinite(Number(location.deliveryFee)) &&
+      Number(location.deliveryFee) >= 0
+    );
+  }
+
   const latitude = Number(location.latitude);
   const longitude = Number(location.longitude);
   if (

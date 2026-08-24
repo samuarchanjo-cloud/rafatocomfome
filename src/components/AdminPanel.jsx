@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   ListFilter,
   LogOut,
+  MapPin,
   PackageCheck,
   Plus,
   Save,
@@ -21,16 +22,20 @@ import {
 import {
   deleteCategory,
   deleteDeliveryRange,
+  deleteDeliveryPostalZone,
   deleteProduct,
+  loadDeliveryPostalZones,
   loadAdminOrders,
   removeProductImage,
   saveBusinessHours,
   saveCategory,
   saveDeliveryRange,
+  saveDeliveryPostalZone,
   saveProduct,
   saveSettings,
   uploadProductImage,
 } from "../lib/api";
+import { formatPostalCode, postalCodeDigits } from "../lib/address";
 import { DAY_NAMES } from "../lib/businessHours";
 import { validateDeliveryRanges } from "../lib/delivery";
 
@@ -41,6 +46,7 @@ const TABS = [
   ["orders", "Pedidos", ShoppingBag],
   ["hours", "Horários", Clock3],
   ["delivery", "Taxas de entrega", Truck],
+  ["postal-zones", "Áreas por CEP", MapPin],
   ["settings", "Configurações", Settings],
 ];
 
@@ -134,6 +140,7 @@ export default function AdminPanel({ store, session, reloadStore, showNotice, on
           showNotice={showNotice}
         />
       )}
+      {tab === "postal-zones" && <PostalZoneManager showNotice={showNotice} />}
       {tab === "settings" && (
         <SettingsManager settings={store.settings} reloadStore={reloadStore} showNotice={showNotice} />
       )}
@@ -440,11 +447,103 @@ function DeliveryManager({ ranges, settings, reloadStore, showNotice }) {
   </div>;
 }
 
+const EMPTY_POSTAL_ZONE = { postal_code: "", label: "", delivery_fee: "", active: true };
+
+function PostalZoneManager({ showNotice }) {
+  const [zones, setZones] = useState([]);
+  const [draft, setDraft] = useState(null);
+  const [isNew, setIsNew] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function reload() {
+    setLoading(true);
+    setError("");
+    try {
+      setZones(await loadDeliveryPostalZones());
+    } catch (loadError) {
+      setError(errorMessage(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { reload(); }, []);
+
+  function start(zone = null) {
+    setIsNew(!zone);
+    setDraft(zone ? { ...zone } : { ...EMPTY_POSTAL_ZONE });
+  }
+
+  function change(field, value) {
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    if (postalCodeDigits(draft.postal_code).length !== 8) {
+      showNotice("Informe um CEP válido com 8 dígitos.", "error");
+      return;
+    }
+    if (draft.delivery_fee === "" || !Number.isFinite(Number(draft.delivery_fee)) || Number(draft.delivery_fee) < 0) {
+      showNotice("Informe uma taxa de entrega válida.", "error");
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveDeliveryPostalZone(draft, isNew);
+      await reload();
+      setDraft(null);
+      showNotice(isNew ? "Área por CEP adicionada." : "Área por CEP atualizada.", "success");
+    } catch (saveError) {
+      showNotice(errorMessage(saveError), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggle(zone) {
+    try {
+      await saveDeliveryPostalZone({ ...zone, active: !zone.active }, false);
+      await reload();
+      showNotice(zone.active ? "Área desativada." : "Área ativada.", "success");
+    } catch (toggleError) {
+      showNotice(errorMessage(toggleError), "error");
+    }
+  }
+
+  async function remove(zone) {
+    if (!window.confirm(`Excluir a área do CEP ${formatPostalCode(zone.postal_code)}?`)) return;
+    try {
+      await deleteDeliveryPostalZone(zone.id);
+      await reload();
+      showNotice("Área por CEP excluída.", "success");
+    } catch (deleteError) {
+      showNotice(errorMessage(deleteError), "error");
+    }
+  }
+
+  return <div className="admin-section">
+    <div className="admin-section-title"><div><h2>Áreas de entrega por CEP</h2><span>Taxas administrativas para endereços sem coordenada exata</span></div><button className="admin-primary" type="button" onClick={() => start()}><Plus size={17} />Adicionar CEP</button></div>
+    {draft && <form className="admin-editor" onSubmit={submit}>
+      <div className="editor-heading"><h3>{isNew ? "Nova área por CEP" : "Editar área por CEP"}</h3><button type="button" onClick={() => setDraft(null)}><X size={19} /></button></div>
+      <div className="field-row three"><label>CEP<input required inputMode="numeric" value={formatPostalCode(draft.postal_code)} onChange={(event) => change("postal_code", postalCodeDigits(event.target.value))} /></label><label>Descrição opcional<input value={draft.label || ""} onChange={(event) => change("label", event.target.value)} placeholder="Parque / nome da rua" /></label><label>Taxa de entrega (R$)<input required type="number" min="0" step="0.01" value={draft.delivery_fee} onChange={(event) => change("delivery_fee", event.target.value)} /></label></div>
+      <label className="admin-check"><input type="checkbox" checked={draft.active !== false} onChange={(event) => change("active", event.target.checked)} />Área ativa</label>
+      <button className="admin-primary wide" disabled={saving}><Save size={17} />{saving ? "Salvando..." : "Salvar área por CEP"}</button>
+    </form>}
+    {loading && <p className="empty">Carregando áreas por CEP...</p>}
+    {error && <div className="admin-warning">{error}</div>}
+    {!loading && !error && <div className="admin-card-list">{zones.map((zone) => <article className="fee-row postal-zone-row" key={zone.id}><div><strong>{formatPostalCode(zone.postal_code)}</strong><span>{zone.label || "Sem descrição"}</span><span>{money(zone.delivery_fee)} · {zone.active ? "Ativo" : "Inativo"}</span></div><div className="row-actions"><button type="button" onClick={() => start(zone)}>Editar</button><button type="button" onClick={() => toggle(zone)}>{zone.active ? "Desativar" : "Ativar"}</button><button className="danger" type="button" onClick={() => remove(zone)}><Trash2 size={16} /></button></div></article>)}</div>}
+    {!loading && !error && zones.length === 0 && <p className="empty">Nenhuma área por CEP cadastrada.</p>}
+  </div>;
+}
+
 function SettingsManager({ settings, reloadStore, showNotice }) {
   const [draft,setDraft]=useState(settings);const [saving,setSaving]=useState(false);useEffect(()=>setDraft(settings),[settings]);const change=(field,value)=>setDraft({...draft,[field]:value});async function submit(event){event.preventDefault();setSaving(true);try{await saveSettings(draft);await reloadStore();showNotice("Configurações salvas.","success");}catch(error){showNotice(errorMessage(error),"error");}finally{setSaving(false);}}
   return <div className="admin-section"><div className="admin-section-title"><h2>Configurações</h2><span>Dados públicos do estabelecimento</span></div><form className="admin-editor" onSubmit={submit}><label>Nome do estabelecimento<input required value={draft.store_name||""} onChange={(event)=>change("store_name",event.target.value)}/></label><label>WhatsApp com DDI e DDD<input required inputMode="numeric" value={draft.whatsapp_number||""} onChange={(event)=>change("whatsapp_number",event.target.value.replace(/\D/g,""))}/></label><div className="field-row"><label>Latitude da loja<input type="number" step="any" required value={draft.store_latitude??""} onChange={(event)=>change("store_latitude",event.target.value)}/></label><label>Longitude da loja<input type="number" step="any" required value={draft.store_longitude??""} onChange={(event)=>change("store_longitude",event.target.value)}/></label></div><div className="field-row"><label>Nome Pix<input value={draft.pix_name||""} onChange={(event)=>change("pix_name",event.target.value)}/></label><label>Chave Pix<input value={draft.pix_key||""} onChange={(event)=>change("pix_key",event.target.value)}/></label></div><label>URL do QR Code Pix<input type="url" value={draft.pix_qr_code_url||""} onChange={(event)=>change("pix_qr_code_url",event.target.value)}/></label><label>URL do logo<input type="url" value={draft.brand_logo_url||""} onChange={(event)=>change("brand_logo_url",event.target.value)}/></label><label>URL do banner principal<input type="url" value={draft.brand_hero_url||""} onChange={(event)=>change("brand_hero_url",event.target.value)}/></label><label>Taxa de cartão (%)<input type="number" min="0" step="0.01" value={draft.card_fee_percent??0} onChange={(event)=>change("card_fee_percent",event.target.value)}/></label><button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving?"Salvando...":"Salvar configurações"}</button></form></div>;
 }
 
 function Orders({ orders, loading, error }) {
-  return <div className="admin-section"><div className="admin-section-title"><h2>Pedidos</h2><span>Últimos 100 pedidos</span></div>{loading&&<p className="empty">Carregando pedidos...</p>}{error&&<div className="admin-warning">{error}</div>}<div className="orders-list">{orders.map((order)=><article key={order.id} className="admin-card"><div className="order-heading"><strong>#{String(order.id).slice(0,8)} · {order.customer_name}</strong><span>{money(order.total)}</span></div><small>{new Date(order.created_at).toLocaleString("pt-BR")} · {order.delivery_type} · {order.payment_method}</small><p>{(order.order_items||[]).map((item)=>`${item.quantity}x ${item.product_name}`).join(", ")}</p>{order.distance_km!=null&&<small>Distância: {Number(order.distance_km).toFixed(2)} km · Entrega: {money(order.delivery_fee)}</small>}</article>)}</div>{!loading&&!error&&orders.length===0&&<p className="empty">Nenhum pedido salvo no Supabase.</p>}</div>;
+  return <div className="admin-section"><div className="admin-section-title"><h2>Pedidos</h2><span>Últimos 100 pedidos</span></div>{loading&&<p className="empty">Carregando pedidos...</p>}{error&&<div className="admin-warning">{error}</div>}<div className="orders-list">{orders.map((order)=><article key={order.id} className="admin-card"><div className="order-heading"><strong>#{String(order.id).slice(0,8)} · {order.customer_name}</strong><span>{money(order.total)}</span></div><small>{new Date(order.created_at).toLocaleString("pt-BR")} · {order.delivery_type} · {order.payment_method}</small><p>{(order.order_items||[]).map((item)=>`${item.quantity}x ${item.product_name}`).join(", ")}</p>{order.delivery_type==="entrega"&&<small>{order.distance_km!=null?`Distância: ${Number(order.distance_km).toFixed(2)} km · `:""}Entrega: {money(order.delivery_fee)}</small>}</article>)}</div>{!loading&&!error&&orders.length===0&&<p className="empty">Nenhum pedido salvo no Supabase.</p>}</div>;
 }

@@ -82,6 +82,13 @@ export function evaluateOrderDelivery(deliveryType, location, ranges, settings) 
     return { allowed: true, fee: 0, code: "PICKUP", message: "Retirada no local." };
   }
 
+  if (location?.source === "postal_zone") {
+    const fee = Number(location.deliveryFee);
+    return Number.isFinite(fee) && fee >= 0
+      ? { allowed: true, fee, code: "POSTAL_ZONE", message: "Entrega disponível para o endereço informado." }
+      : { allowed: false, fee: 0, code: "LOCATION_REQUIRED", message: "Valide o endereço para calcular a entrega." };
+  }
+
   const centerDistance = Number.isFinite(Number(location?.centerKm)) ? Number(location.centerKm) : location?.km;
   const assessedDistance = effectiveDeliveryDistance(centerDistance, location);
   return evaluateDelivery(assessedDistance, ranges, settings, location?.precision || "exact");

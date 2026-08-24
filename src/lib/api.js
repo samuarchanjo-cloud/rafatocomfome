@@ -4,6 +4,10 @@ import { callPlaceOrderRpc } from "./orderRpc";
 
 const PRODUCTS_BUCKET = "product-images";
 
+function postalCodeDigits(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 8);
+}
+
 function isMissingTable(error) {
   return error?.code === "PGRST205" || error?.code === "42P01";
 }
@@ -107,6 +111,50 @@ export async function loadAdminOrders() {
     .limit(100);
   if (error) throw error;
   return data || [];
+}
+
+export async function findDeliveryPostalZone(value, { signal } = {}) {
+  const postalCode = postalCodeDigits(value);
+  if (postalCode.length !== 8) return null;
+  let query = supabase.rpc("get_delivery_postal_zone", { p_postal_code: postalCode });
+  if (signal && typeof query.abortSignal === "function") query = query.abortSignal(signal);
+  const { data, error } = await query;
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return null;
+  return {
+    postalCode: postalCodeDigits(row.postal_code),
+    deliveryFee: Number(row.delivery_fee),
+  };
+}
+
+export async function loadDeliveryPostalZones() {
+  const { data, error } = await supabase
+    .from("delivery_postal_zones")
+    .select("*")
+    .order("postal_code", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function saveDeliveryPostalZone(zone, isNew) {
+  const payload = {
+    postal_code: postalCodeDigits(zone.postal_code),
+    label: zone.label?.trim() || null,
+    delivery_fee: Number(zone.delivery_fee),
+    active: zone.active !== false,
+  };
+  const query = isNew
+    ? supabase.from("delivery_postal_zones").insert(payload)
+    : supabase.from("delivery_postal_zones").update(payload).eq("id", zone.id);
+  const { data, error } = await query.select("*").single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteDeliveryPostalZone(zoneId) {
+  const { error } = await supabase.from("delivery_postal_zones").delete().eq("id", zoneId);
+  if (error) throw error;
 }
 
 function productPayload(product) {

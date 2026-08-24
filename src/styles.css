@@ -1616,6 +1616,11 @@ textarea {
   gap: 12px;
 }
 
+.postal-zone-row .row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .hours-form {
   gap: 8px;
 }
@@ -1770,6 +1775,11 @@ textarea {
     grid-template-columns: 68px minmax(0, 1fr);
   }
 
+  .postal-zone-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .admin-product-row img,
   .category-admin-row img {
     width: 68px;
@@ -1777,8 +1787,10 @@ textarea {
   }
 
   .admin-product-row .row-actions,
-  .category-admin-row .row-actions {
+  .category-admin-row .row-actions,
+  .postal-zone-row .row-actions {
     grid-column: 1 / -1;
+    width: 100%;
   }
 
   .row-actions button:first-child {

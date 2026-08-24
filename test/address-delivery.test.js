@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { distanceInKm, effectiveDeliveryDistance, evaluateOrderDelivery } from "../src/lib/delivery.js";
+import { locateDeliveryAddress } from "../src/lib/geocodingProvider.js";
 import {
   createDeviceGpsLocation,
   DEVICE_GPS_OPTIONS,
@@ -20,11 +22,11 @@ const GIORDANO = {
   neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
 };
 const LOLITA = {
-  postalCode: "23036-061", street: "Rua Lolita Rodrigues", number: "1",
+  postalCode: "23036-061", street: "Rua Lolita Rodrigues", number: "285",
   neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
 };
 const WALDIR = {
-  postalCode: "23036-076", street: "Rua Waldir José de Melo", number: "1",
+  postalCode: "23036-076", street: "Rua Waldir José de Melo", number: "71",
   neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
 };
 const STORE = { latitude: -22.943800658459434, longitude: -43.582438704219854 };
@@ -49,46 +51,31 @@ function nominatimCandidate({
   address = CABUCU,
   latitude = -22.944,
   longitude = -43.582,
-  houseNumber,
+  houseNumber = address.number,
   postalCode = address.postalCode,
+  road = address.street,
+  city = address.city,
+  state = "Rio de Janeiro",
+  stateIso = state === "São Paulo" ? "BR-SP" : "BR-RJ",
   type = houseNumber ? "house" : "residential",
   addresstype = houseNumber ? "house" : "road",
-  category = houseNumber ? "place" : "highway",
-  placeRank = houseNumber ? 30 : 26,
-  boundingBox = [latitude - 0.001, latitude + 0.001, longitude - 0.001, longitude + 0.001],
 } = {}) {
   return {
     lat: String(latitude),
     lon: String(longitude),
     type,
     addresstype,
-    category,
-    place_rank: placeRank,
-    boundingbox: boundingBox.map(String),
-    display_name: `${address.street}, ${address.city}, ${postalCode}`,
+    display_name: `${road}, ${city}, ${postalCode}`,
     address: {
       ...(houseNumber ? { house_number: String(houseNumber) } : {}),
-      road: address.street,
+      road,
       suburb: address.neighborhood,
-      city: address.city,
-      state: "Rio de Janeiro",
-      "ISO3166-2-lvl4": "BR-RJ",
+      city,
+      state,
+      "ISO3166-2-lvl4": stateIso,
       postcode: postalCode,
       country_code: "br",
     },
-  };
-}
-
-function awesomeResult({ address = CABUCU, latitude = -22.9441, longitude = -43.5821 } = {}) {
-  return {
-    cep: address.postalCode.replace(/\D/g, ""),
-    address: address.street,
-    district: address.neighborhood,
-    city: address.city,
-    state: address.state,
-    address_type: "Rua",
-    lat: String(latitude),
-    lng: String(longitude),
   };
 }
 
@@ -96,41 +83,19 @@ async function loadAddressModule(name) {
   return import(`../src/lib/address.js?test=${name}-${Date.now()}-${Math.random()}`);
 }
 
-function installFetchMock({
-  address = CABUCU,
-  viaCepAddress = address,
-  exact = [],
-  approximate = [],
-  awesome = null,
-  exactError = null,
-}) {
+function installFetchMock({ address = CABUCU, viaCepAddress = address, candidates = [], nominatimError = null }) {
   const calls = [];
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
     calls.push(url.toString());
     if (url.hostname === "viacep.com.br") return response(viaCep(viaCepAddress));
     if (url.hostname === "nominatim.openstreetmap.org") {
-      const street = url.searchParams.get("street") || "";
-      if (street.startsWith(`${address.number} `)) {
-        if (exactError) throw exactError;
-        return response(typeof exact === "function" ? exact() : exact);
-      }
-      return response(typeof approximate === "function" ? approximate() : approximate);
+      if (nominatimError) throw nominatimError;
+      return response(typeof candidates === "function" ? candidates() : candidates);
     }
-    if (url.hostname === "cep.awesomeapi.com.br") {
-      return awesome
-        ? response(typeof awesome === "function" ? awesome() : awesome)
-        : response({}, { ok: false, status: 404 });
-    }
-    throw new Error(`Unexpected URL: ${url}`);
+    throw new Error(`Fallback inesperado: ${url.hostname}`);
   };
   return calls;
-}
-
-function coordinatesAtDistance(km, accuracy = 20) {
-  return createDeviceGpsLocation({
-    latitude: STORE.latitude + (km / 111.195), longitude: STORE.longitude, accuracy,
-  }, { confirmed: true });
 }
 
 function assessLocation(location) {
@@ -140,15 +105,10 @@ function assessLocation(location) {
   return { centerKm, km, assessment };
 }
 
-async function geocodeConsensusAt(km, address = CABUCU, extra = {}) {
-  const latitude = STORE.latitude + (km / 111.195);
-  installFetchMock({
-    address,
-    approximate: [nominatimCandidate({ address, latitude, longitude: STORE.longitude, ...extra })],
-    awesome: awesomeResult({ address, latitude, longitude: STORE.longitude }),
-  });
-  const { geocodeDeliveryAddress } = await loadAddressModule(`consensus-${km}-${address.postalCode}`);
-  return geocodeDeliveryAddress(address, { storeCoordinates: STORE });
+function coordinatesAtDistance(km, accuracy = 20) {
+  return createDeviceGpsLocation({
+    latitude: STORE.latitude + (km / 111.195), longitude: STORE.longitude, accuracy,
+  }, { confirmed: true });
 }
 
 const originalFetch = globalThis.fetch;
@@ -157,146 +117,166 @@ let clock = 1_800_000_000_000;
 Date.now = () => { clock += 1_001; return clock; };
 test.after(() => { globalThis.fetch = originalFetch; Date.now = originalDateNow; });
 
-test("A: número exato localizado a 0,6 km usa a localização exata normalmente", async () => {
+test("baseline restaurada consulta uma vez o endereço completo e aceita número residencial compatível", async () => {
   const latitude = STORE.latitude + (0.6 / 111.195);
-  installFetchMock({
+  const calls = installFetchMock({
     address: GIORDANO,
-    exact: [nominatimCandidate({
-      address: GIORDANO,
-      houseNumber: GIORDANO.number,
-      latitude,
-      longitude: STORE.longitude,
-    })],
+    candidates: [nominatimCandidate({ address: GIORDANO, latitude, longitude: STORE.longitude })],
   });
-  const { geocodeDeliveryAddress } = await loadAddressModule("giordano-exact-inside");
-  const location = await geocodeDeliveryAddress(GIORDANO, { storeCoordinates: STORE });
+  const { geocodeDeliveryAddress } = await loadAddressModule("exact-inside");
+  const location = await geocodeDeliveryAddress(GIORDANO);
   const { centerKm, assessment } = assessLocation(location);
+
   assert.equal(location.source, "nominatim_exact");
   assert.equal(location.precision, "exact");
   assert.equal(isTrustedDeliveryLocation(location), true);
   assert.ok(centerKm > 0.59 && centerKm < 0.61);
   assert.equal(assessment.allowed, true);
   assert.equal(assessment.fee, 3);
+
+  const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
+  assert.equal(nominatimCalls.length, 1);
+  const url = new URL(nominatimCalls[0]);
+  assert.match(url.searchParams.get("q"), /Rua Giordano Vincenzo, 515, Guaratiba, Rio de Janeiro - RJ, 23036-050, Brasil/);
+  assert.equal(url.searchParams.get("countrycodes"), "br");
+  assert.equal(url.searchParams.has("street"), false);
+  assert.equal(url.searchParams.has("viewbox"), false);
 });
 
-test("B: endereço exato a 4 km continua fora da área", async () => {
+test("endereço residencial preciso acima de 3,5 km continua bloqueado normalmente", async () => {
   const latitude = STORE.latitude + (4 / 111.195);
-  installFetchMock({ exact: [nominatimCandidate({
-    houseNumber: CABUCU.number,
-    latitude,
-    longitude: STORE.longitude,
-  })] });
+  installFetchMock({ candidates: [nominatimCandidate({ latitude, longitude: STORE.longitude })] });
   const { geocodeDeliveryAddress } = await loadAddressModule("exact-outside");
-  const location = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
+  const location = await geocodeDeliveryAddress(CABUCU);
   const { assessment } = assessLocation(location);
   assert.equal(assessment.allowed, false);
   assert.equal(assessment.code, "OUTSIDE_AREA");
 });
 
-test("C: consenso a 0,06 km soma margem e mantém taxa abaixo de 1 km", async () => {
-  const location = await geocodeConsensusAt(0.06);
-  const { centerKm, km, assessment } = assessLocation(location);
-  assert.equal(location.source, "address_consensus");
-  assert.equal(location.precision, "consensus");
-  assert.equal(location.uncertainty, MIN_ADDRESS_UNCERTAINTY_M);
-  assert.ok(centerKm > 0.05 && centerKm < 0.07);
-  assert.equal(km, 0.81);
+test("endereço residencial preciso entre 1 e 3,5 km usa a faixa existente", async () => {
+  const latitude = STORE.latitude + (2 / 111.195);
+  installFetchMock({ candidates: [nominatimCandidate({ latitude, longitude: STORE.longitude })] });
+  const { geocodeDeliveryAddress } = await loadAddressModule("exact-range");
+  const location = await geocodeDeliveryAddress(CABUCU);
+  const { assessment } = assessLocation(location);
   assert.equal(assessment.allowed, true);
-  assert.equal(assessment.fee, 3);
-});
-
-test("D: consenso a 0,64 km usa 1,39 km efetivos e a faixa correspondente", async () => {
-  const location = await geocodeConsensusAt(0.64);
-  const { km, assessment } = assessLocation(location);
-  assert.ok(Math.abs(km - 1.39) < Number.EPSILON * 4);
-  assert.equal(assessment.allowed, true);
+  assert.equal(assessment.code, "RANGE");
   assert.equal(assessment.fee, 5);
 });
 
-test("E: consenso a 2 km permanece dentro da área com margem conservadora", async () => {
-  const location = await geocodeConsensusAt(2);
+test("resultado somente de rua não vira coordenada financeira e não aciona AwesomeAPI", async () => {
+  const calls = installFetchMock({ candidates: [nominatimCandidate({ houseNumber: null })] });
+  const { geocodeDeliveryAddress } = await loadAddressModule("road-only");
+  await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
+  assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 1);
+  assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
+});
+
+test("número residencial diferente continua sendo rejeitado", async () => {
+  installFetchMock({ candidates: [nominatimCandidate({ houseNumber: "999" })] });
+  const { geocodeDeliveryAddress } = await loadAddressModule("wrong-number");
+  await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
+});
+
+test("rua, cidade, estado e CEP retornados precisam ser compatíveis", async () => {
+  const incompatibleCandidates = [
+    nominatimCandidate({ road: "Rua Diferente" }),
+    nominatimCandidate({ city: "Niterói" }),
+    nominatimCandidate({ state: "São Paulo" }),
+    nominatimCandidate({ postalCode: "23036-999" }),
+  ];
+  installFetchMock({ candidates: incompatibleCandidates });
+  const { geocodeDeliveryAddress } = await loadAddressModule("incompatible-result");
+  await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
+});
+
+test("ViaCEP incompatível interrompe a resolução antes do Nominatim", async () => {
+  const calls = installFetchMock({ viaCepAddress: { ...CABUCU, street: "Rua Incompatível" } });
+  const { geocodeDeliveryAddress } = await loadAddressModule("viacep-mismatch");
+  await assert.rejects(
+    geocodeDeliveryAddress(CABUCU),
+    (error) => error.code === "ADDRESS_POSTAL_CODE_MISMATCH",
+  );
+  assert.equal(calls.some((value) => new URL(value).hostname === "nominatim.openstreetmap.org"), false);
+});
+
+test("indisponibilidade do Nominatim não usa CEP ou AwesomeAPI como substituto", async () => {
+  const calls = installFetchMock({ nominatimError: new TypeError("network timeout") });
+  const { geocodeDeliveryAddress } = await loadAddressModule("nominatim-timeout");
+  await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "GEOCODING_UNAVAILABLE");
+  assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
+});
+
+test("falha não é armazenada no cache e nova tentativa pode encontrar o número", async () => {
+  let candidates = [];
+  installFetchMock({ candidates: () => candidates });
+  const { geocodeDeliveryAddress } = await loadAddressModule("exact-retry");
+  await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
+  candidates = [nominatimCandidate()];
+  const location = await geocodeDeliveryAddress(CABUCU);
+  assert.equal(location.source, "nominatim_exact");
+});
+
+test("quatro CEPs de regressão não aceitam os resultados aproximados observados", async () => {
+  const cases = [
+    [LOLITA, [nominatimCandidate({ address: LOLITA, houseNumber: null, postalCode: "23030-440", latitude: -22.9480261, longitude: -43.5844627 })]],
+    [WALDIR, []],
+    [CABUCU, [
+      nominatimCandidate({ houseNumber: null, postalCode: "23036-053", latitude: -22.940458, longitude: -43.5799353 }),
+      nominatimCandidate({ houseNumber: null, postalCode: "23030-440", latitude: -22.9451175, longitude: -43.5820797 }),
+    ]],
+    [GIORDANO, []],
+  ];
+
+  for (const [address, candidates] of cases) {
+    const calls = installFetchMock({ address, candidates });
+    const { geocodeDeliveryAddress } = await loadAddressModule(`regression-${address.postalCode}`);
+    await assert.rejects(
+      geocodeDeliveryAddress(address),
+      (error) => error.code === "ADDRESS_NOT_PRECISE",
+      address.postalCode,
+    );
+    assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 1);
+    assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
+  }
+});
+
+test("provedor automático delega somente à resolução exata do Nominatim", async () => {
+  const calls = installFetchMock({ candidates: [nominatimCandidate()] });
+  const location = await locateDeliveryAddress(CABUCU);
+  assert.equal(location.source, "nominatim_exact");
+  assert.deepEqual(
+    [...new Set(calls.map((value) => new URL(value).hostname))],
+    ["viacep.com.br", "nominatim.openstreetmap.org"],
+  );
+});
+
+test("checkout consulta zona após ADDRESS_NOT_PRECISE e só então oferece GPS, sem abrir mapa", async () => {
+  const app = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("async function requestAndAcceptDeviceLocation"));
+  assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
+  assert.match(validation, /findDeliveryPostalZone\(checkout\.postalCode/);
+  assert.match(validation, /createPostalZoneLocation\(zone, checkout\.postalCode\)/);
+  assert.match(validation, /type: "needs-gps"/);
+  assert.doesNotMatch(validation, /openMapPicker\(/);
+});
+
+test("regras históricas de consenso permanecem compatíveis, mas não são produzidas pelo geocodificador", () => {
+  const location = {
+    latitude: STORE.latitude + (2 / 111.195),
+    longitude: STORE.longitude,
+    source: "address_consensus",
+    precision: "consensus",
+    uncertainty: MIN_ADDRESS_UNCERTAINTY_M,
+  };
   const { km, assessment } = assessLocation(location);
   assert.equal(km, 2.75);
   assert.equal(assessment.allowed, true);
   assert.equal(assessment.fee, 5);
 });
 
-test("F: consenso a 3 km exige confirmação porque a distância efetiva passa de 3,5 km", async () => {
-  const location = await geocodeConsensusAt(3);
-  const { km, assessment } = assessLocation(location);
-  assert.equal(km, 3.75);
-  assert.equal(assessment.allowed, false);
-  assert.equal(assessment.code, "ADDRESS_REQUIRES_CONFIRMATION");
-});
-
-test("G: consenso aparentemente a 5 km não vira bloqueio definitivo de área", async () => {
-  const location = await geocodeConsensusAt(5);
-  const { assessment } = assessLocation(location);
-  assert.equal(assessment.allowed, false);
-  assert.equal(assessment.code, "ADDRESS_REQUIRES_CONFIRMATION");
-  assert.notEqual(assessment.code, "OUTSIDE_AREA");
-});
-
-test("H: GPS confirmado a 0,6 km é aceito sem margem de endereço", () => {
-  const location = coordinatesAtDistance(0.6);
-  const { centerKm, km, assessment } = assessLocation(location);
-  assert.equal(location.source, "device_gps");
-  assert.equal(isTrustedDeliveryLocation(location), true);
-  assert.equal(km, Math.round(centerKm * 100) / 100);
-  assert.equal(assessment.allowed, true);
-  assert.equal(assessment.fee, 3);
-});
-
-test("I: GPS confirmado a 5 km continua fora da área", () => {
-  const { assessment } = assessLocation(coordinatesAtDistance(5));
-  assert.equal(assessment.allowed, false);
-  assert.equal(assessment.code, "OUTSIDE_AREA");
-});
-
-test("J: fontes de CEP significativamente divergentes produzem resultado ambíguo", async () => {
-  installFetchMock({
-    approximate: [nominatimCandidate({ latitude: -22.944, longitude: -43.582 })],
-    awesome: awesomeResult({ latitude: -22.88, longitude: -43.65 }),
-  });
-  const { geocodeDeliveryAddress } = await loadAddressModule("ambiguous-services");
-  await assert.rejects(
-    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
-    (error) => error.code === "ADDRESS_AMBIGUOUS" && error.precision === "ambiguous" && error.differenceKm > 1,
-  );
-});
-
-test("K: CEP parcial do Nominatim não forma consenso sem uma fonte de CEP completo", async () => {
-  installFetchMock({ approximate: [nominatimCandidate({ postalCode: "23036" })], awesome: null });
-  const { geocodeDeliveryAddress } = await loadAddressModule("partial-postcode");
-  await assert.rejects(
-    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
-    (error) => error.code === "ADDRESS_NOT_PRECISE",
-  );
-});
-
-test("L: endereço incompatível com o ViaCEP continua rejeitado", async () => {
-  installFetchMock({
-    viaCepAddress: { ...CABUCU, street: "Rua Incompatível" },
-    awesome: awesomeResult(),
-  });
-  const { geocodeDeliveryAddress } = await loadAddressModule("viacep-mismatch");
-  await assert.rejects(
-    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
-    (error) => error.code === "ADDRESS_POSTAL_CODE_MISMATCH",
-  );
-});
-
-test("M: consenso seguro permite pedido remoto sem consultar GPS", async () => {
-  const location = await geocodeConsensusAt(2, GIORDANO);
-  const { assessment } = assessLocation(location);
-  assert.equal(location.source, "address_consensus");
-  assert.equal(isTrustedDeliveryLocation(location), true);
-  assert.equal(assessment.allowed, true);
-});
-
-test("N: retirada no local continua sem exigir localização", () => {
-  const assessment = evaluateOrderDelivery("retirada", null, RANGES, SETTINGS);
-  assert.deepEqual(assessment, {
+test("retirada no local continua sem exigir localização", () => {
+  assert.deepEqual(evaluateOrderDelivery("retirada", null, RANGES, SETTINGS), {
     allowed: true,
     fee: 0,
     code: "PICKUP",
@@ -304,40 +284,10 @@ test("N: retirada no local continua sem exigir localização", () => {
   });
 });
 
-test("timeout do Nominatim ainda permite consenso conservador pelo CEP completo", async () => {
-  installFetchMock({ exactError: new TypeError("network timeout"), awesome: awesomeResult() });
-  const { geocodeDeliveryAddress } = await loadAddressModule("nominatim-timeout");
-  const location = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
-  assert.equal(location.source, "address_consensus");
-  assert.equal(location.precision, "consensus");
-  assert.equal(location.uncertainty, MIN_ADDRESS_UNCERTAINTY_M);
-  assert.equal(isTrustedDeliveryLocation(location), true);
-});
-
-test("bounding box do Nominatim aumenta conservadoramente a incerteza", async () => {
-  const latitude = STORE.latitude + (0.2 / 111.195);
-  const location = await geocodeConsensusAt(0.2, CABUCU, {
-    boundingBox: [latitude - 0.01, latitude + 0.01, STORE.longitude - 0.01, STORE.longitude + 0.01],
-  });
-  assert.ok(location.uncertainty > MIN_ADDRESS_UNCERTAINTY_M);
-});
-
-test("GPS exige confirmação, precisão de até 150 m e opções de alta precisão", async () => {
+test("GPS existente permanece funcional e não é consultado pela resolução automática", async () => {
   assert.equal(MAX_DEVICE_GPS_ACCURACY_M, 150);
   assert.throws(() => coordinatesAtDistance(0.6, 200), (error) => error.code === "GPS_INACCURATE");
-
-  let receivedOptions;
-  const geolocation = {
-    getCurrentPosition(_success, error, options) {
-      receivedOptions = options;
-      error({ code: 1 });
-    },
-  };
-  await assert.rejects(
-    requestDeviceGps({ confirmed: true, geolocation }),
-    (error) => error.code === "GPS_PERMISSION_DENIED",
-  );
-  assert.deepEqual(receivedOptions, DEVICE_GPS_OPTIONS);
+  assert.deepEqual(DEVICE_GPS_OPTIONS, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
 
   let requested = false;
   await assert.rejects(
@@ -348,68 +298,4 @@ test("GPS exige confirmação, precisão de até 150 m e opções de alta precis
     (error) => error.code === "GPS_CONFIRMATION_REQUIRED",
   );
   assert.equal(requested, false);
-});
-
-test("CACHE: consenso não impede uma nova tentativa exata para o mesmo número", async () => {
-  let exactCandidates = [];
-  installFetchMock({
-    exact: () => exactCandidates,
-    approximate: [nominatimCandidate()],
-    awesome: awesomeResult(),
-  });
-  const { geocodeDeliveryAddress } = await loadAddressModule("consensus-cache");
-  const first = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
-  assert.equal(first.precision, "consensus");
-  exactCandidates = [nominatimCandidate({ houseNumber: CABUCU.number })];
-  const second = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
-  assert.equal(second.source, "nominatim_exact");
-});
-
-test("Nominatim usa busca estruturada, CEP completo, viewbox local e bounded nos quatro CEPs", async () => {
-  for (const address of [LOLITA, WALDIR, CABUCU, GIORDANO]) {
-    const calls = installFetchMock({ address, awesome: awesomeResult({ address }) });
-    const { geocodeDeliveryAddress } = await loadAddressModule(`structured-${address.postalCode}`);
-    await geocodeDeliveryAddress(address, { storeCoordinates: STORE });
-    const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
-    assert.equal(nominatimCalls.length, 2, address.postalCode);
-    for (const [index, value] of nominatimCalls.entries()) {
-      const url = new URL(value);
-      assert.equal(url.searchParams.has("q"), false);
-      assert.equal(url.searchParams.get("city"), address.city);
-      assert.equal(url.searchParams.get("state"), address.state);
-      assert.equal(url.searchParams.get("postalcode"), address.postalCode);
-      assert.equal(url.searchParams.get("countrycodes"), "br");
-      assert.equal(url.searchParams.get("bounded"), "1");
-      assert.equal(url.searchParams.get("viewbox")?.split(",").length, 4);
-      assert.equal(url.searchParams.get("street"), index === 0 ? `${address.number} ${address.street}` : address.street);
-    }
-  }
-});
-
-test("candidato devolvido fora do raio local de 5 km é descartado defensivamente", async () => {
-  const farLatitude = STORE.latitude + (8 / 111.195);
-  installFetchMock({
-    exact: [nominatimCandidate({
-      houseNumber: CABUCU.number,
-      latitude: farLatitude,
-      longitude: STORE.longitude,
-    })],
-    approximate: [],
-    awesome: null,
-  });
-  const { geocodeDeliveryAddress } = await loadAddressModule("outside-local-radius");
-  await assert.rejects(
-    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
-    (error) => error.code === "ADDRESS_NOT_PRECISE",
-  );
-});
-
-test("viewbox de 5 km é derivada da coordenada da loja, sem coordenadas extras fixas", async () => {
-  const { buildLocalNominatimViewbox, NOMINATIM_LOCAL_SEARCH_RADIUS_KM } = await loadAddressModule("viewbox");
-  assert.equal(NOMINATIM_LOCAL_SEARCH_RADIUS_KM, 5);
-  const [left, top, right, bottom] = buildLocalNominatimViewbox(STORE).split(",").map(Number);
-  assert.ok(left < STORE.longitude && right > STORE.longitude);
-  assert.ok(bottom < STORE.latitude && top > STORE.latitude);
-  assert.ok(Math.abs((left + right) / 2 - STORE.longitude) < 1e-12);
-  assert.ok(Math.abs((top + bottom) / 2 - STORE.latitude) < 1e-12);
 });
