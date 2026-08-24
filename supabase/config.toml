@@ -1,0 +1,2 @@
+[functions.delivery-routing]
+verify_jwt = true

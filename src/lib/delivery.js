@@ -1,3 +1,5 @@
+import { MIN_ADDRESS_UNCERTAINTY_M } from "./location.js";
+
 export function distanceInKm(origin, destination) {
   const earthRadiusKm = 6371;
   const toRad = (value) => (value * Math.PI) / 180;
@@ -11,7 +13,27 @@ export function distanceInKm(origin, destination) {
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-export function evaluateDelivery(distance, ranges, settings) {
+export function effectiveDeliveryDistance(centerDistanceKm, location) {
+  const center = Number(centerDistanceKm);
+  if (!Number.isFinite(center)) return Number.NaN;
+  const roundedCenter = Math.round(center * 100) / 100;
+  if (location?.source !== "address_consensus") return roundedCenter;
+  const uncertaintyM = Math.max(Number(location.uncertainty) || 0, MIN_ADDRESS_UNCERTAINTY_M);
+  return roundedCenter + (uncertaintyM / 1000);
+}
+
+export function evaluateDelivery(distance, ranges, settings, precision = "exact") {
+  const isConsensus = precision === "consensus";
+  const isStreetFallback = precision === "street";
+  if (precision !== "exact" && !isConsensus && !isStreetFallback) {
+    return {
+      allowed: false,
+      fee: 0,
+      code: precision === "ambiguous" ? "ADDRESS_AMBIGUOUS" : "ADDRESS_NOT_PRECISE",
+      message: "Não foi possível confirmar precisamente a localização. Revise o endereço e tente novamente.",
+    };
+  }
+
   if (!Number.isFinite(distance)) {
     return { allowed: false, fee: 0, code: "LOCATION_REQUIRED", message: "Valide o endereço para calcular a entrega." };
   }
@@ -22,18 +44,32 @@ export function evaluateDelivery(distance, ranges, settings) {
     return { allowed: false, fee: 0, code: "DELIVERY_NOT_CONFIGURED", message: "A área de entrega ainda não foi configurada." };
   }
   if (roundedDistance > maximum) {
-    return { allowed: false, fee: 0, code: "OUTSIDE_AREA", message: `Endereço fora da área máxima de ${maximum.toFixed(2)} km.` };
+    if (isConsensus) {
+      return {
+        allowed: false,
+        fee: 0,
+        code: "ADDRESS_REQUIRES_CONFIRMATION",
+        message: "Não conseguimos confirmar com segurança se este endereço está dentro da área de entrega.",
+      };
+    }
+    return {
+      allowed: false,
+      fee: 0,
+      code: "UBER_AVAILABLE",
+      uberAvailable: true,
+      message: "Este endereço fica fora da nossa área de entrega própria.",
+    };
   }
 
-  if (roundedDistance < 1) {
+  if (roundedDistance <= 1) {
     const behavior = settings.below_one_km_behavior;
-    if (behavior === "free") return { allowed: true, fee: 0, code: "FREE", message: "Entrega grátis abaixo de 1 km." };
+    if (behavior === "free") return { allowed: true, fee: 0, code: "FREE", message: "Entrega grátis até 1 km." };
     if (behavior === "fixed") {
       const fee = Number(settings.below_one_km_fee);
-      if (Number.isFinite(fee) && fee >= 0) return { allowed: true, fee, code: "FIXED", message: "Taxa fixa abaixo de 1 km." };
-      return { allowed: false, fee: 0, code: "DELIVERY_NOT_CONFIGURED", message: "A taxa abaixo de 1 km ainda não foi definida." };
+      if (Number.isFinite(fee) && fee >= 0) return { allowed: true, fee, code: "FIXED", message: "Taxa fixa até 1 km." };
+      return { allowed: false, fee: 0, code: "DELIVERY_NOT_CONFIGURED", message: "A taxa até 1 km ainda não foi definida." };
     }
-    return { allowed: false, fee: 0, code: "BELOW_ONE_BLOCKED", message: "Pedidos abaixo de 1 km estão bloqueados para entrega." };
+    return { allowed: false, fee: 0, code: "BELOW_ONE_BLOCKED", message: "Pedidos até 1 km estão bloqueados para entrega." };
   }
 
   const range = (ranges || []).find(
@@ -46,6 +82,23 @@ export function evaluateDelivery(distance, ranges, settings) {
     return { allowed: false, fee: 0, code: "NO_FEE_RANGE", message: "Não há uma faixa de entrega configurada para esta distância." };
   }
   return { allowed: true, fee: Number(range.fee) || 0, code: "RANGE", range, message: "Entrega disponível para o endereço informado." };
+}
+
+export function evaluateOrderDelivery(deliveryType, location, ranges, settings) {
+  if (deliveryType === "retirada") {
+    return { allowed: true, fee: 0, code: "PICKUP", message: "Retirada no local." };
+  }
+
+  if (location?.source === "postal_zone") {
+    const fee = Number(location.deliveryFee);
+    return Number.isFinite(fee) && fee >= 0
+      ? { allowed: true, fee, code: "POSTAL_ZONE", message: "Entrega disponível para o endereço informado." }
+      : { allowed: false, fee: 0, code: "LOCATION_REQUIRED", message: "Valide o endereço para calcular a entrega." };
+  }
+
+  const centerDistance = Number.isFinite(Number(location?.centerKm)) ? Number(location.centerKm) : location?.km;
+  const assessedDistance = effectiveDeliveryDistance(centerDistance, location);
+  return evaluateDelivery(assessedDistance, ranges, settings, location?.precision || "exact");
 }
 
 export function validateDeliveryRanges(ranges) {

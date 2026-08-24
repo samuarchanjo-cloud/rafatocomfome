@@ -1,7 +1,12 @@
 import { supabase } from "./supabase";
 import { FALLBACK_BUSINESS_HOURS, FALLBACK_CATEGORIES, PUBLIC_FALLBACKS } from "../menuData";
+import { placeRoutedOrder, quoteDeliveryRoute as quoteRoutedDelivery } from "./routing";
 
 const PRODUCTS_BUCKET = "product-images";
+
+function postalCodeDigits(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 8);
+}
 
 function isMissingTable(error) {
   return error?.code === "PGRST205" || error?.code === "42P01";
@@ -106,6 +111,62 @@ export async function loadAdminOrders() {
     .limit(100);
   if (error) throw error;
   return data || [];
+}
+
+export async function resolveDeliveryArea(value, { signal } = {}) {
+  const postalCode = postalCodeDigits(value);
+  if (postalCode.length !== 8) return null;
+  let query = supabase.rpc("resolve_delivery_area", {
+    p_postal_code: postalCode,
+    p_neighborhood: null,
+  });
+  if (signal && typeof query.abortSignal === "function") query = query.abortSignal(signal);
+  const { data, error } = await query;
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return null;
+  return {
+    id: row.id,
+    deliveryFee: Number(row.delivery_fee),
+    matchType: row.match_type,
+  };
+}
+
+export async function loadDeliveryPostalZones() {
+  const { data, error } = await supabase
+    .from("delivery_postal_zones")
+    .select("*")
+    .order("match_type", { ascending: true })
+    .order("priority", { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function saveDeliveryPostalZone(zone, isNew) {
+  const matchType = zone.match_type || "exact";
+  const payload = {
+    match_type: matchType,
+    postal_code: matchType === "exact" ? postalCodeDigits(zone.postal_code) : null,
+    postal_prefix: matchType === "prefix" ? postalCodeDigits(zone.postal_prefix) : null,
+    postal_code_start: matchType === "range" ? postalCodeDigits(zone.postal_code_start) : null,
+    postal_code_end: matchType === "range" ? postalCodeDigits(zone.postal_code_end) : null,
+    neighborhood: matchType === "neighborhood" ? String(zone.neighborhood || "").trim() : null,
+    label: zone.label?.trim() || null,
+    delivery_fee: Number(zone.delivery_fee),
+    priority: Math.trunc(Number(zone.priority) || 0),
+    active: zone.active !== false,
+  };
+  const query = isNew
+    ? supabase.from("delivery_postal_zones").insert(payload)
+    : supabase.from("delivery_postal_zones").update(payload).eq("id", zone.id);
+  const { data, error } = await query.select("*").single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteDeliveryPostalZone(zoneId) {
+  const { error } = await supabase.from("delivery_postal_zones").delete().eq("id", zoneId);
+  if (error) throw error;
 }
 
 function productPayload(product) {
@@ -240,7 +301,9 @@ export async function removeProductImage(publicUrl) {
 }
 
 export async function placeOrder(payload) {
-  const { data, error } = await supabase.rpc("place_order", { p_order: payload });
-  if (error) throw error;
-  return data;
+  return placeRoutedOrder(payload, supabase);
+}
+
+export async function quoteDeliveryRoute(location) {
+  return quoteRoutedDelivery(location, supabase);
 }

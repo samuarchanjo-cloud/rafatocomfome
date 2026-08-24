@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   ListFilter,
   LogOut,
+  MapPin,
   PackageCheck,
   Plus,
   Save,
@@ -20,19 +21,21 @@ import {
 } from "lucide-react";
 import {
   deleteCategory,
-  deleteDeliveryRange,
+  deleteDeliveryPostalZone,
   deleteProduct,
+  loadDeliveryPostalZones,
   loadAdminOrders,
   removeProductImage,
   saveBusinessHours,
   saveCategory,
   saveDeliveryRange,
+  saveDeliveryPostalZone,
   saveProduct,
   saveSettings,
   uploadProductImage,
 } from "../lib/api";
+import { formatPostalCode, postalCodeDigits } from "../lib/address";
 import { DAY_NAMES } from "../lib/businessHours";
-import { validateDeliveryRanges } from "../lib/delivery";
 
 const TABS = [
   ["overview", "Visão geral", LayoutDashboard],
@@ -41,6 +44,7 @@ const TABS = [
   ["orders", "Pedidos", ShoppingBag],
   ["hours", "Horários", Clock3],
   ["delivery", "Taxas de entrega", Truck],
+  ["postal-zones", "Áreas de entrega", MapPin],
   ["settings", "Configurações", Settings],
 ];
 
@@ -134,6 +138,7 @@ export default function AdminPanel({ store, session, reloadStore, showNotice, on
           showNotice={showNotice}
         />
       )}
+      {tab === "postal-zones" && <PostalZoneManager showNotice={showNotice} />}
       {tab === "settings" && (
         <SettingsManager settings={store.settings} reloadStore={reloadStore} showNotice={showNotice} />
       )}
@@ -419,24 +424,195 @@ function HoursManager({ hours, reloadStore, showNotice }) {
 
 function DeliveryManager({ ranges, settings, reloadStore, showNotice }) {
   const [settingsDraft, setSettingsDraft] = useState(settings);
-  const [rangeDraft, setRangeDraft] = useState(null);
-  const [isNew, setIsNew] = useState(false);
+  const activeRanges = useMemo(
+    () => ranges.filter((range) => range.active !== false).sort((first, second) => Number(first.min_distance_km) - Number(second.min_distance_km)),
+    [ranges],
+  );
+  const normalRange = activeRanges[0] || null;
+  const [normalFee, setNormalFee] = useState(normalRange?.fee ?? "");
   const [saving, setSaving] = useState(false);
-  useEffect(() => setSettingsDraft(settings), [settings]);
+  useEffect(() => {
+    setSettingsDraft(settings);
+    setNormalFee(normalRange?.fee ?? "");
+  }, [settings, normalRange?.id, normalRange?.fee]);
   async function saveRules(event) {
     event.preventDefault();
-    if (!settingsDraft.maximum_delivery_distance_km || Number(settingsDraft.maximum_delivery_distance_km) <= 0) { showNotice("Defina uma distância máxima maior que zero.", "error"); return; }
-    if (settingsDraft.below_one_km_behavior === "fixed" && (settingsDraft.below_one_km_fee === "" || Number(settingsDraft.below_one_km_fee) < 0)) { showNotice("Defina a taxa fixa abaixo de 1 km.", "error"); return; }
-    setSaving(true); try { await saveSettings(settingsDraft); await reloadStore(); showNotice("Regras de entrega salvas.", "success"); } catch(error){showNotice(errorMessage(error),"error");} finally{setSaving(false);}
+    const maximum = Number(settingsDraft.maximum_delivery_distance_km);
+    const shortFee = Number(settingsDraft.below_one_km_fee);
+    const regularFee = Number(normalFee);
+    if (!Number.isFinite(maximum) || maximum <= 1) { showNotice("Defina um limite máximo maior que 1 km.", "error"); return; }
+    if (!Number.isFinite(shortFee) || shortFee < 0) { showNotice("Defina a taxa até 1 km.", "error"); return; }
+    if (!Number.isFinite(regularFee) || regularFee < 0) { showNotice("Defina a taxa acima de 1 km.", "error"); return; }
+    if (activeRanges.length > 1) { showNotice("Existe mais de uma faixa ativa. Mantenha uma única faixa para a regra comercial atual.", "error"); return; }
+    setSaving(true);
+    try {
+      await saveSettings({
+        ...settingsDraft,
+        below_one_km_behavior: "fixed",
+        below_one_km_fee: shortFee,
+        maximum_delivery_distance_km: maximum,
+      });
+      await saveDeliveryRange({
+        ...(normalRange || {}),
+        min_distance_km: 1,
+        max_distance_km: maximum,
+        fee: regularFee,
+        active: true,
+      }, !normalRange);
+      await reloadStore();
+      showNotice("Taxas e limite de entrega salvos.", "success");
+    } catch (error) {
+      showNotice(errorMessage(error), "error");
+    } finally {
+      setSaving(false);
+    }
   }
-  function startRange(range=null){setIsNew(!range);setRangeDraft(range?{...range}:{min_distance_km:ranges.length?"":"1.00",max_distance_km:ranges.length?"":"1.99",fee:"",active:true});}
-  async function submitRange(event){event.preventDefault();const candidate=isNew?[...ranges,rangeDraft]:ranges.map((item)=>item.id===rangeDraft.id?rangeDraft:item);const validation=validateDeliveryRanges(candidate);if(validation){showNotice(validation,"error");return;}setSaving(true);try{await saveDeliveryRange(rangeDraft,isNew);await reloadStore();setRangeDraft(null);showNotice("Faixa de entrega salva.","success");}catch(error){showNotice(errorMessage(error),"error");}finally{setSaving(false);}}
-  async function remove(range){if(!window.confirm("Excluir esta faixa de entrega?"))return;try{await deleteDeliveryRange(range.id);await reloadStore();showNotice("Faixa excluída.","success");}catch(error){showNotice(errorMessage(error),"error");}}
-  return <div className="admin-section"><div className="admin-section-title"><h2>Taxas de entrega</h2><span>Valores por distância</span></div>
-    <form className="admin-editor" onSubmit={saveRules}><h3>Área e regra abaixo de 1 km</h3><div className="field-row"><label>Comportamento abaixo de 1 km<select value={settingsDraft.below_one_km_behavior} onChange={(event)=>setSettingsDraft({...settingsDraft,below_one_km_behavior:event.target.value})}><option value="blocked">Bloquear</option><option value="free">Grátis</option><option value="fixed">Taxa fixa</option></select></label>{settingsDraft.below_one_km_behavior==="fixed"&&<label>Taxa fixa (R$)<input type="number" min="0" step="0.01" value={settingsDraft.below_one_km_fee??""} onChange={(event)=>setSettingsDraft({...settingsDraft,below_one_km_fee:event.target.value})}/></label>}</div><label>Distância máxima de atendimento (km)<input type="number" min="0.01" step="0.01" value={settingsDraft.maximum_delivery_distance_km??""} onChange={(event)=>setSettingsDraft({...settingsDraft,maximum_delivery_distance_km:event.target.value})}/></label><button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving?"Salvando...":"Salvar regras"}</button></form>
-    <div className="admin-section-title compact"><h3>Faixas a partir de 1 km</h3><button className="admin-primary" type="button" onClick={()=>startRange()}><Plus size={17}/>Nova faixa</button></div>
-    {rangeDraft&&<form className="admin-editor" onSubmit={submitRange}><div className="editor-heading"><h3>{isNew?"Nova faixa":"Editar faixa"}</h3><button type="button" onClick={()=>setRangeDraft(null)}><X size={19}/></button></div><div className="field-row three"><label>Distância mínima (km)<input type="number" min="1" step="0.01" required value={rangeDraft.min_distance_km} onChange={(event)=>setRangeDraft({...rangeDraft,min_distance_km:event.target.value})}/></label><label>Distância máxima (km)<input type="number" min="1" step="0.01" required value={rangeDraft.max_distance_km} onChange={(event)=>setRangeDraft({...rangeDraft,max_distance_km:event.target.value})}/></label><label>Taxa (R$)<input type="number" min="0" step="0.01" required value={rangeDraft.fee} onChange={(event)=>setRangeDraft({...rangeDraft,fee:event.target.value})}/></label></div><label className="admin-check"><input type="checkbox" checked={rangeDraft.active!==false} onChange={(event)=>setRangeDraft({...rangeDraft,active:event.target.checked})}/>Faixa ativa</label><button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving?"Salvando...":"Salvar faixa"}</button></form>}
-    <div className="admin-card-list">{ranges.map((range)=><article className="fee-row" key={range.id}><div><strong>{Number(range.min_distance_km).toFixed(2)} a {Number(range.max_distance_km).toFixed(2)} km</strong><span>{money(range.fee)} · {range.active?"Ativa":"Inativa"}</span></div><div className="row-actions"><button type="button" onClick={()=>startRange(range)}>Editar</button><button className="danger" type="button" onClick={()=>remove(range)}><Trash2 size={16}/></button></div></article>)}</div>{ranges.length===0&&<p className="empty">Nenhuma faixa cadastrada. Entregas a partir de 1 km permanecerão bloqueadas.</p>}
+  return <div className="admin-section"><div className="admin-section-title"><h2>Taxas de entrega</h2><span>Configuração por distância real de rota</span></div>
+    <form className="admin-editor" onSubmit={saveRules}>
+      <h3>Entrega própria</h3>
+      <p className="empty">A distância é calculada pelas ruas. Acima do limite, o checkout oferece Uber Entrega com frete pago separadamente pelo cliente.</p>
+      <div className="field-row three">
+        <label>Taxa até 1 km (R$)<input type="number" min="0" step="0.01" required value={settingsDraft.below_one_km_fee ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, below_one_km_fee: event.target.value })} /></label>
+        <label>Taxa acima de 1 km (R$)<input type="number" min="0" step="0.01" required value={normalFee} onChange={(event) => setNormalFee(event.target.value)} /></label>
+        <label>Limite da entrega própria (km)<input type="number" min="1.01" step="0.01" required value={settingsDraft.maximum_delivery_distance_km ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, maximum_delivery_distance_km: event.target.value })} /></label>
+      </div>
+      <div className="admin-card"><strong>Regra atual</strong><p>Até 1 km: {money(settingsDraft.below_one_km_fee)}</p><p>Acima de 1 km até {Number(settingsDraft.maximum_delivery_distance_km || 0).toFixed(2)} km: {money(normalFee)}</p></div>
+      {activeRanges.length > 1 && <p className="admin-warning">Há mais de uma faixa ativa no banco. Consolide-as antes de salvar esta regra simplificada.</p>}
+      <button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving ? "Salvando..." : "Salvar taxas e limite"}</button>
+    </form>
+  </div>;
+}
+
+const DELIVERY_AREA_TYPES = {
+  exact: "CEP exato — Exceção de geolocalização",
+  prefix: "Prefixo de CEP",
+  range: "Faixa de CEP",
+  neighborhood: "Bairro",
+};
+
+const EMPTY_POSTAL_ZONE = {
+  match_type: "exact",
+  postal_code: "",
+  postal_prefix: "",
+  postal_code_start: "",
+  postal_code_end: "",
+  neighborhood: "",
+  label: "",
+  delivery_fee: "",
+  priority: 0,
+  active: true,
+};
+
+function deliveryAreaRuleLabel(zone) {
+  if (zone.match_type === "prefix") return `${zone.postal_prefix || ""}*`;
+  if (zone.match_type === "range") {
+    return `${formatPostalCode(zone.postal_code_start)} até ${formatPostalCode(zone.postal_code_end)}`;
+  }
+  if (zone.match_type === "neighborhood") return zone.neighborhood || "Bairro não informado";
+  return formatPostalCode(zone.postal_code);
+}
+
+function PostalZoneManager({ showNotice }) {
+  const [zones, setZones] = useState([]);
+  const [draft, setDraft] = useState(null);
+  const [isNew, setIsNew] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function reload() {
+    setLoading(true);
+    setError("");
+    try {
+      setZones(await loadDeliveryPostalZones());
+    } catch (loadError) {
+      setError(errorMessage(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { reload(); }, []);
+
+  function start(zone = null) {
+    setIsNew(!zone);
+    setDraft(zone ? { ...zone } : { ...EMPTY_POSTAL_ZONE });
+  }
+
+  function change(field, value) {
+    setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    const matchType = draft.match_type || "exact";
+    const exactValid = matchType !== "exact" || postalCodeDigits(draft.postal_code).length === 8;
+    const prefixLength = postalCodeDigits(draft.postal_prefix).length;
+    const prefixValid = matchType !== "prefix" || (prefixLength >= 1 && prefixLength <= 8);
+    const start = postalCodeDigits(draft.postal_code_start);
+    const end = postalCodeDigits(draft.postal_code_end);
+    const rangeValid = matchType !== "range" || (start.length === 8 && end.length === 8 && start <= end);
+    const neighborhoodValid = matchType !== "neighborhood" || Boolean(draft.neighborhood?.trim());
+    if (!exactValid) return showNotice("Informe um CEP exato válido com 8 dígitos.", "error");
+    if (!prefixValid) return showNotice("Informe um prefixo de CEP com 1 a 8 dígitos.", "error");
+    if (!rangeValid) return showNotice("Informe uma faixa de CEP válida, do menor para o maior.", "error");
+    if (!neighborhoodValid) return showNotice("Informe o bairro da área de entrega.", "error");
+    if (draft.delivery_fee === "" || !Number.isFinite(Number(draft.delivery_fee)) || Number(draft.delivery_fee) < 0) {
+      showNotice("Informe uma taxa de entrega válida.", "error");
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveDeliveryPostalZone(draft, isNew);
+      await reload();
+      setDraft(null);
+      showNotice(isNew ? "Área de entrega adicionada." : "Área de entrega atualizada.", "success");
+    } catch (saveError) {
+      showNotice(errorMessage(saveError), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggle(zone) {
+    try {
+      await saveDeliveryPostalZone({ ...zone, active: !zone.active }, false);
+      await reload();
+      showNotice(zone.active ? "Área desativada." : "Área ativada.", "success");
+    } catch (toggleError) {
+      showNotice(errorMessage(toggleError), "error");
+    }
+  }
+
+  async function remove(zone) {
+    if (!window.confirm(`Excluir a área ${deliveryAreaRuleLabel(zone)}?`)) return;
+    try {
+      await deleteDeliveryPostalZone(zone.id);
+      await reload();
+      showNotice("Área de entrega excluída.", "success");
+    } catch (deleteError) {
+      showNotice(errorMessage(deleteError), "error");
+    }
+  }
+
+  return <div className="admin-section">
+    <div className="admin-section-title"><div><h2>Áreas de entrega</h2><span>Lista de exceções para CEPs cuja geolocalização automática está incorreta</span></div><button className="admin-primary" type="button" onClick={() => start()}><Plus size={17} />Adicionar área</button></div>
+    {draft && <form className="admin-editor" onSubmit={submit}>
+      <div className="editor-heading"><h3>{isNew ? "Nova área de entrega" : "Editar área de entrega"}</h3><button type="button" onClick={() => setDraft(null)}><X size={19} /></button></div>
+      <label>Tipo de regra<select value={draft.match_type || "exact"} onChange={(event) => change("match_type", event.target.value)}>{Object.entries(DELIVERY_AREA_TYPES).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+      {(draft.match_type || "exact") === "exact" && <div className="admin-warning"><strong>Exceção de geolocalização</strong><br /><span>Use apenas para CEPs cuja localização automática esteja incorreta.</span></div>}
+      {(draft.match_type || "exact") === "exact" && <label>CEP exato<input required inputMode="numeric" value={formatPostalCode(draft.postal_code)} onChange={(event) => change("postal_code", postalCodeDigits(event.target.value))} /></label>}
+      {draft.match_type === "prefix" && <label>Prefixo de CEP<input required inputMode="numeric" maxLength={8} value={draft.postal_prefix || ""} onChange={(event) => change("postal_prefix", postalCodeDigits(event.target.value))} placeholder="Ex.: 230360" /></label>}
+      {draft.match_type === "range" && <div className="field-row"><label>CEP inicial<input required inputMode="numeric" value={formatPostalCode(draft.postal_code_start)} onChange={(event) => change("postal_code_start", postalCodeDigits(event.target.value))} /></label><label>CEP final<input required inputMode="numeric" value={formatPostalCode(draft.postal_code_end)} onChange={(event) => change("postal_code_end", postalCodeDigits(event.target.value))} /></label></div>}
+      {draft.match_type === "neighborhood" && <label>Bairro<input required value={draft.neighborhood || ""} onChange={(event) => change("neighborhood", event.target.value)} placeholder="Ex.: Guaratiba" /></label>}
+      <div className="field-row three"><label>Descrição opcional<input value={draft.label || ""} onChange={(event) => change("label", event.target.value)} placeholder="Nome interno da área" /></label><label>Taxa de entrega (R$)<input required type="number" min="0" step="0.01" value={draft.delivery_fee} onChange={(event) => change("delivery_fee", event.target.value)} /></label><label>Prioridade<input type="number" step="1" value={draft.priority ?? 0} onChange={(event) => change("priority", event.target.value)} /></label></div>
+      <label className="admin-check"><input type="checkbox" checked={draft.active !== false} onChange={(event) => change("active", event.target.checked)} />Área ativa</label>
+      <button className="admin-primary wide" disabled={saving}><Save size={17} />{saving ? "Salvando..." : "Salvar área"}</button>
+    </form>}
+    {loading && <p className="empty">Carregando áreas de entrega...</p>}
+    {error && <div className="admin-warning">{error}</div>}
+    {!loading && !error && <div className="admin-card-list">{zones.map((zone) => <article className="fee-row postal-zone-row" key={zone.id}><div><span>{DELIVERY_AREA_TYPES[zone.match_type] || "CEP exato"}</span><strong>{deliveryAreaRuleLabel(zone)}</strong><span>{zone.label || "Sem descrição"}</span><span>{money(zone.delivery_fee)} · prioridade {Number(zone.priority) || 0} · {zone.active ? "Ativo" : "Inativo"}</span></div><div className="row-actions"><button type="button" onClick={() => start(zone)}>Editar</button><button type="button" onClick={() => toggle(zone)}>{zone.active ? "Desativar" : "Ativar"}</button><button className="danger" type="button" aria-label="Excluir" onClick={() => remove(zone)}><Trash2 size={16} /></button></div></article>)}</div>}
+    {!loading && !error && zones.length === 0 && <p className="empty">Nenhuma área de entrega cadastrada.</p>}
   </div>;
 }
 
@@ -446,5 +622,5 @@ function SettingsManager({ settings, reloadStore, showNotice }) {
 }
 
 function Orders({ orders, loading, error }) {
-  return <div className="admin-section"><div className="admin-section-title"><h2>Pedidos</h2><span>Últimos 100 pedidos</span></div>{loading&&<p className="empty">Carregando pedidos...</p>}{error&&<div className="admin-warning">{error}</div>}<div className="orders-list">{orders.map((order)=><article key={order.id} className="admin-card"><div className="order-heading"><strong>#{String(order.id).slice(0,8)} · {order.customer_name}</strong><span>{money(order.total)}</span></div><small>{new Date(order.created_at).toLocaleString("pt-BR")} · {order.delivery_type} · {order.payment_method}</small><p>{(order.order_items||[]).map((item)=>`${item.quantity}x ${item.product_name}`).join(", ")}</p>{order.distance_km!=null&&<small>Distância: {Number(order.distance_km).toFixed(2)} km · Entrega: {money(order.delivery_fee)}</small>}</article>)}</div>{!loading&&!error&&orders.length===0&&<p className="empty">Nenhum pedido salvo no Supabase.</p>}</div>;
+  return <div className="admin-section"><div className="admin-section-title"><h2>Pedidos</h2><span>Últimos 100 pedidos</span></div>{loading&&<p className="empty">Carregando pedidos...</p>}{error&&<div className="admin-warning">{error}</div>}<div className="orders-list">{orders.map((order)=><article key={order.id} className="admin-card"><div className="order-heading"><strong>#{String(order.id).slice(0,8)} · {order.customer_name}</strong><span>{money(order.total)}</span></div><small>{new Date(order.created_at).toLocaleString("pt-BR")} · {order.delivery_type} · {order.payment_method}</small><p>{(order.order_items||[]).map((item)=>`${item.quantity}x ${item.product_name}`).join(", ")}</p>{order.delivery_type==="entrega"&&<small>{order.distance_km!=null?`Distância: ${Number(order.distance_km).toFixed(2)} km · `:""}Entrega: {money(order.delivery_fee)}</small>}</article>)}</div>{!loading&&!error&&orders.length===0&&<p className="empty">Nenhum pedido salvo no Supabase.</p>}</div>;
 }
