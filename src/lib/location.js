@@ -23,7 +23,7 @@ export function isTrustedDeliveryLocation(location) {
       location.precision === "administrative" &&
       /^\d{8}$/.test(String(location.postalCode || "")) &&
       Boolean(String(location.ruleId || "").trim()) &&
-      ["exact", "prefix", "range", "neighborhood"].includes(location.matchType) &&
+      ["exact", "prefix", "range"].includes(location.matchType) &&
       Number.isFinite(Number(location.deliveryFee)) &&
       Number(location.deliveryFee) >= 0
     );

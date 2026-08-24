@@ -107,10 +107,10 @@ stable
 security definer
 set search_path = public, pg_temp
 as $$
+  -- p_neighborhood é reservado para uso futuro, após validação server-side CEP ↔ bairro.
+  -- Nesta versão ele nunca participa de uma decisão financeira.
   with request as (
-    select
-      regexp_replace(coalesce(p_postal_code, ''), '[^0-9]', '', 'g') as postal_code,
-      public.normalize_delivery_neighborhood(p_neighborhood) as neighborhood
+    select regexp_replace(coalesce(p_postal_code, ''), '[^0-9]', '', 'g') as postal_code
   )
   select zone.id, zone.delivery_fee, zone.match_type
   from public.delivery_postal_zones zone
@@ -127,24 +127,17 @@ as $$
         zone.match_type = 'range'
         and request.postal_code between zone.postal_code_start and zone.postal_code_end
       )
-      or (
-        zone.match_type = 'neighborhood'
-        and request.neighborhood <> ''
-        and public.normalize_delivery_neighborhood(zone.neighborhood) = request.neighborhood
-      )
     )
   order by
     case zone.match_type
       when 'exact' then 1
       when 'prefix' then 2
       when 'range' then 3
-      when 'neighborhood' then 4
     end,
     case zone.match_type
       when 'exact' then 8
       when 'prefix' then length(zone.postal_prefix)
       when 'range' then -((zone.postal_code_end::bigint) - (zone.postal_code_start::bigint))
-      when 'neighborhood' then length(public.normalize_delivery_neighborhood(zone.neighborhood))
     end desc,
     zone.priority desc,
     zone.created_at asc,
@@ -198,7 +191,6 @@ declare
   v_latitude numeric;
   v_longitude numeric;
   v_postal_code text;
-  v_neighborhood text;
   v_location_source text := nullif(trim(coalesce(p_order->>'location_source', '')), '');
   v_location_accuracy_m numeric;
   v_location_uncertainty_m numeric;
@@ -248,11 +240,10 @@ begin
 
     if v_location_source = 'postal_zone' then
       v_postal_code := regexp_replace(coalesce(p_order->>'postal_code', ''), '[^0-9]', '', 'g');
-      v_neighborhood := trim(coalesce(p_order->>'neighborhood', ''));
       if length(v_postal_code) <> 8 then raise exception 'DELIVERY_ZONE_NOT_FOUND'; end if;
 
       select area.* into v_delivery_area
-      from public.resolve_delivery_area(v_postal_code, v_neighborhood) area;
+      from public.resolve_delivery_area(v_postal_code, null) area;
       if not found then raise exception 'DELIVERY_ZONE_NOT_FOUND'; end if;
 
       if nullif(trim(coalesce(p_order->>'location_accuracy_m', '')), '') is not null then

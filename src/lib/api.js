@@ -113,12 +113,12 @@ export async function loadAdminOrders() {
   return data || [];
 }
 
-export async function resolveDeliveryArea(value, neighborhood, { signal } = {}) {
+export async function resolveDeliveryArea(value, { signal } = {}) {
   const postalCode = postalCodeDigits(value);
   if (postalCode.length !== 8) return null;
   let query = supabase.rpc("resolve_delivery_area", {
     p_postal_code: postalCode,
-    p_neighborhood: String(neighborhood || "").trim() || null,
+    p_neighborhood: null,
   });
   if (signal && typeof query.abortSignal === "function") query = query.abortSignal(signal);
   const { data, error } = await query;

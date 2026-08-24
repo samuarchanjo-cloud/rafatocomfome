@@ -373,9 +373,9 @@ function App() {
       if (error.code === "ADDRESS_NOT_PRECISE") {
         try {
           setAddressValidationStatus({ type: "loading", message: "Verificando disponibilidade da entrega..." });
-          const zone = await resolveDeliveryArea(checkout.postalCode, checkout.neighborhood, { signal: controller.signal });
+          const zone = await resolveDeliveryArea(checkout.postalCode, { signal: controller.signal });
           if (controller.signal.aborted) return;
-          const location = createPostalZoneLocation(zone, checkout.postalCode, checkout.neighborhood);
+          const location = createPostalZoneLocation(zone, checkout.postalCode);
           if (location) {
             setDeliveryLocation(location);
             setAddressValidationStatus({ type: "success", message: "Entrega disponível para o endereço informado." });
@@ -483,7 +483,6 @@ function App() {
         longitude: checkout.deliveryType === "entrega" ? deliveryLocation?.longitude : null,
         location_source: checkout.deliveryType === "entrega" ? deliveryLocation?.source : null,
         postal_code: checkout.deliveryType === "entrega" ? postalCodeDigits(checkout.postalCode) : null,
-        neighborhood: checkout.deliveryType === "entrega" ? checkout.neighborhood.trim() : null,
         location_accuracy_m: null,
         location_uncertainty_m: null,
         items: cartLines.map((item) => ({ product_id: item.id, quantity: item.qty })),
