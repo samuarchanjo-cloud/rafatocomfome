@@ -113,18 +113,22 @@ export async function loadAdminOrders() {
   return data || [];
 }
 
-export async function findDeliveryPostalZone(value, { signal } = {}) {
+export async function resolveDeliveryArea(value, neighborhood, { signal } = {}) {
   const postalCode = postalCodeDigits(value);
   if (postalCode.length !== 8) return null;
-  let query = supabase.rpc("get_delivery_postal_zone", { p_postal_code: postalCode });
+  let query = supabase.rpc("resolve_delivery_area", {
+    p_postal_code: postalCode,
+    p_neighborhood: String(neighborhood || "").trim() || null,
+  });
   if (signal && typeof query.abortSignal === "function") query = query.abortSignal(signal);
   const { data, error } = await query;
   if (error) throw error;
   const row = Array.isArray(data) ? data[0] : data;
   if (!row) return null;
   return {
-    postalCode: postalCodeDigits(row.postal_code),
+    id: row.id,
     deliveryFee: Number(row.delivery_fee),
+    matchType: row.match_type,
   };
 }
 
@@ -132,16 +136,24 @@ export async function loadDeliveryPostalZones() {
   const { data, error } = await supabase
     .from("delivery_postal_zones")
     .select("*")
-    .order("postal_code", { ascending: true });
+    .order("match_type", { ascending: true })
+    .order("priority", { ascending: false });
   if (error) throw error;
   return data || [];
 }
 
 export async function saveDeliveryPostalZone(zone, isNew) {
+  const matchType = zone.match_type || "exact";
   const payload = {
-    postal_code: postalCodeDigits(zone.postal_code),
+    match_type: matchType,
+    postal_code: matchType === "exact" ? postalCodeDigits(zone.postal_code) : null,
+    postal_prefix: matchType === "prefix" ? postalCodeDigits(zone.postal_prefix) : null,
+    postal_code_start: matchType === "range" ? postalCodeDigits(zone.postal_code_start) : null,
+    postal_code_end: matchType === "range" ? postalCodeDigits(zone.postal_code_end) : null,
+    neighborhood: matchType === "neighborhood" ? String(zone.neighborhood || "").trim() : null,
     label: zone.label?.trim() || null,
     delivery_fee: Number(zone.delivery_fee),
+    priority: Math.trunc(Number(zone.priority) || 0),
     active: zone.active !== false,
   };
   const query = isNew

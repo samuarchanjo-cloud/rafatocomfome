@@ -6,7 +6,8 @@ import { evaluateOrderDelivery } from "../src/lib/delivery.js";
 import { isTrustedDeliveryLocation } from "../src/lib/location.js";
 import { createPostalZoneLocation } from "../src/lib/postalZone.js";
 
-const migrationUrl = new URL("../supabase/migrations/20260824_postal_delivery_zones.sql", import.meta.url);
+const firstMigrationUrl = new URL("../supabase/migrations/20260824_postal_delivery_zones.sql", import.meta.url);
+const rulesMigrationUrl = new URL("../supabase/migrations/20260825_delivery_area_rules.sql", import.meta.url);
 const appUrl = new URL("../src/App.jsx", import.meta.url);
 const apiUrl = new URL("../src/lib/api.js", import.meta.url);
 const adminUrl = new URL("../src/components/AdminPanel.jsx", import.meta.url);
@@ -14,111 +15,134 @@ const stylesUrl = new URL("../src/styles.css", import.meta.url);
 const legacyMigrationUrl = new URL("../supabase/migrations/20260720_admin_delivery_security.sql", import.meta.url);
 
 async function sources() {
-  const [migration, app, api, admin, styles, legacy] = await Promise.all([
-    readFile(migrationUrl, "utf8"),
-    readFile(appUrl, "utf8"),
-    readFile(apiUrl, "utf8"),
-    readFile(adminUrl, "utf8"),
-    readFile(stylesUrl, "utf8"),
-    readFile(legacyMigrationUrl, "utf8"),
+  const [firstMigration, rulesMigration, app, api, admin, styles, legacy] = await Promise.all([
+    readFile(firstMigrationUrl, "utf8"), readFile(rulesMigrationUrl, "utf8"), readFile(appUrl, "utf8"),
+    readFile(apiUrl, "utf8"), readFile(adminUrl, "utf8"), readFile(stylesUrl, "utf8"), readFile(legacyMigrationUrl, "utf8"),
   ]);
-  return { migration, app, api, admin, styles, legacy };
+  return { firstMigration, rulesMigration, app, api, admin, styles, legacy };
 }
 
-test("zona administrativa de R$ 3 é confiável para UI sem coordenada ou distância fictícia", () => {
-  const location = createPostalZoneLocation({ postal_code: "23036061", delivery_fee: 3 }, "23036-061");
+function resolvedRule({ id = "rule-1", deliveryFee = 3, matchType = "exact" } = {}) {
+  return { id, deliveryFee, matchType };
+}
+
+test("postal_zone usa a regra resolvida sem coordenada ou distância fictícia", () => {
+  const location = createPostalZoneLocation(resolvedRule(), "23036-061", "Guaratiba");
   const assessment = evaluateOrderDelivery("entrega", location, [], {});
   assert.equal(location.latitude, undefined);
   assert.equal(location.longitude, undefined);
   assert.equal(location.km, null);
+  assert.equal(location.postalCode, "23036061");
+  assert.equal(location.neighborhood, "Guaratiba");
   assert.equal(isTrustedDeliveryLocation(location), true);
-  assert.deepEqual(assessment, {
-    allowed: true,
-    fee: 3,
-    code: "POSTAL_ZONE",
-    message: "Entrega disponível para o endereço informado.",
-  });
+  assert.deepEqual(assessment, { allowed: true, fee: 3, code: "POSTAL_ZONE", message: "Entrega disponível para o endereço informado." });
 });
 
-test("zona administrativa de R$ 5 usa a taxa recebida do RPC", () => {
-  const location = createPostalZoneLocation({ postalCode: "23036076", deliveryFee: 5 }, "23036-076");
-  assert.equal(evaluateOrderDelivery("entrega", location, [], {}).fee, 5);
+test("resultado administrativo inválido não vira localização confiável", () => {
+  assert.equal(createPostalZoneLocation(null, "23036-061", "Guaratiba"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ id: "" }), "23036-061", "Guaratiba"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ matchType: "unknown" }), "23036-061", "Guaratiba"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ deliveryFee: -1 }), "23036-061", "Guaratiba"), null);
 });
 
-test("zona de outro CEP ou taxa inválida não é aceita pelo frontend", () => {
-  assert.equal(createPostalZoneLocation({ postal_code: "23036050", delivery_fee: 3 }, "23036-061"), null);
-  assert.equal(createPostalZoneLocation({ postal_code: "23036061", delivery_fee: -1 }, "23036-061"), null);
+test("migration incremental converte registros atuais em exact sem apagar dados", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /add column if not exists match_type text/i);
+  assert.match(rulesMigration, /update public\.delivery_postal_zones[\s\S]*set match_type = 'exact'[\s\S]*where match_type is null/i);
+  assert.match(rulesMigration, /alter column postal_code drop not null/i);
+  assert.doesNotMatch(rulesMigration, /(?:truncate|delete from) public\.delivery_postal_zones/i);
+  assert.doesNotMatch(rulesMigration, /(?:drop|truncate|delete from) public\.orders/i);
 });
 
-test("migration cria tabela vazia normalizada e não cadastra CEPs de regressão", async () => {
-  const { migration } = await sources();
-  assert.match(migration, /create table if not exists public\.delivery_postal_zones/i);
-  assert.match(migration, /postal_code text not null unique check \(postal_code ~ '\^\[0-9\]\{8\}\$'\)/i);
-  assert.match(migration, /delivery_fee numeric\(10,2\) not null check \(delivery_fee >= 0\)/i);
-  for (const postalCode of ["23036-061", "23036-076", "23036-060", "23036-050", "23036061", "23036076", "23036060", "23036050"]) {
-    assert.doesNotMatch(migration, new RegExp(postalCode));
+test("schema suporta exact, prefix, range e neighborhood com campos exclusivos", async () => {
+  const { rulesMigration } = await sources();
+  for (const column of ["postal_prefix", "postal_code_start", "postal_code_end", "neighborhood", "priority"]) {
+    assert.match(rulesMigration, new RegExp(`add column if not exists ${column}`, "i"));
   }
+  assert.match(rulesMigration, /match_type in \('exact', 'prefix', 'range', 'neighborhood'\)/i);
+  assert.match(rulesMigration, /delivery_postal_zones_rule_shape/i);
+  assert.match(rulesMigration, /postal_prefix ~ '\^\[0-9\]\{1,8\}\$'/i);
+  assert.match(rulesMigration, /postal_code_start <= postal_code_end/i);
 });
 
-test("RLS impede escrita pública e permite CRUD apenas ao administrador", async () => {
-  const { migration } = await sources();
-  assert.match(migration, /alter table public\.delivery_postal_zones enable row level security/i);
-  assert.match(migration, /revoke all on table public\.delivery_postal_zones from anon/i);
-  for (const action of ["select", "insert", "update", "delete"]) {
-    assert.match(migration, new RegExp(`create policy delivery_postal_zones_admin_${action}[\\s\\S]*public\\.is_admin\\(\\)`, "i"));
-  }
-  assert.doesNotMatch(migration, /delivery_postal_zones[^;]*for (?:insert|update|delete) to anon/i);
+test("resolver público recebe CEP e bairro e retorna somente id, taxa e tipo", async () => {
+  const { rulesMigration, api } = await sources();
+  assert.match(rulesMigration, /function public\.resolve_delivery_area\([\s\S]*p_postal_code text,[\s\S]*p_neighborhood text/i);
+  assert.match(rulesMigration, /returns table \(id uuid, delivery_fee numeric, match_type text\)/i);
+  assert.match(rulesMigration, /grant execute on function public\.resolve_delivery_area\(text, text\) to anon, authenticated/i);
+  assert.match(api, /supabase\.rpc\("resolve_delivery_area", \{[\s\S]*p_postal_code: postalCode,[\s\S]*p_neighborhood:/i);
+  const lookup = api.slice(api.indexOf("resolveDeliveryArea"), api.indexOf("loadDeliveryPostalZones"));
+  assert.doesNotMatch(lookup, /\.from\("delivery_postal_zones"\)/);
 });
 
-test("checkout público consulta somente RPC de zona ativa", async () => {
-  const { migration, api } = await sources();
-  assert.match(migration, /create or replace function public\.get_delivery_postal_zone\(p_postal_code text\)/i);
-  assert.match(migration, /where zone\.active[\s\S]*zone\.postal_code = regexp_replace/i);
-  assert.match(migration, /grant execute on function public\.get_delivery_postal_zone\(text\) to anon, authenticated/i);
-  assert.match(api, /supabase\.rpc\("get_delivery_postal_zone", \{ p_postal_code: postalCode \}\)/);
-  assert.doesNotMatch(api.slice(api.indexOf("findDeliveryPostalZone"), api.indexOf("loadDeliveryPostalZones")), /\.from\("delivery_postal_zones"\)/);
+test("RPC público anterior continua compatível com regras baseadas em CEP", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /create or replace function public\.get_delivery_postal_zone\(p_postal_code text\)/i);
+  assert.match(rulesMigration, /from public\.resolve_delivery_area\(p_postal_code, null\) area/i);
+  assert.match(rulesMigration, /grant execute on function public\.get_delivery_postal_zone\(text\) to anon, authenticated/i);
 });
 
-test("place_order_v2 aceita postal_zone e exige zona ativa do CEP completo", async () => {
-  const { migration } = await sources();
-  assert.match(migration, /v_location_source not in \('nominatim_exact', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone'\)/i);
-  assert.match(migration, /v_postal_code := regexp_replace\(coalesce\(p_order->>'postal_code', ''\), '\[\^0-9\]', '', 'g'\)/i);
-  assert.match(migration, /where zone\.postal_code = v_postal_code and zone\.active/i);
-  assert.match(migration, /if not found then raise exception 'DELIVERY_ZONE_NOT_FOUND'/i);
+test("exact funciona e vence prefix, range e neighborhood", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /zone\.match_type = 'exact' and zone\.postal_code = request\.postal_code/i);
+  assert.match(rulesMigration, /when 'exact' then 1[\s\S]*when 'prefix' then 2[\s\S]*when 'range' then 3[\s\S]*when 'neighborhood' then 4/i);
 });
 
-test("postal_zone usa taxa do banco, ignora valores financeiros do cliente e não aplica Haversine", async () => {
-  const { migration } = await sources();
-  const postalBranch = migration.slice(
-    migration.indexOf("if v_location_source = 'postal_zone' then"),
-    migration.indexOf("else", migration.indexOf("if v_location_source = 'postal_zone' then")),
-  );
-  assert.match(postalBranch, /v_delivery_fee := v_postal_zone\.delivery_fee/i);
-  assert.match(postalBranch, /v_distance := null/i);
-  assert.match(postalBranch, /v_latitude := null/i);
-  assert.doesNotMatch(postalBranch, /haversine_distance_km/i);
-  assert.doesNotMatch(migration, /p_order->>'(?:delivery_fee|total|zone_id)'/i);
-  assert.match(migration, /v_card_fee := round\(\(v_subtotal \+ v_delivery_fee\) \* v_settings\.card_fee_percent \/ 100, 2\)/i);
-  assert.match(migration, /v_total := v_subtotal \+ v_delivery_fee \+ v_card_fee/i);
+test("prefix funciona e o maior prefixo vence o menor", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /left\(request\.postal_code, length\(zone\.postal_prefix\)\) = zone\.postal_prefix/i);
+  assert.match(rulesMigration, /when 'prefix' then length\(zone\.postal_prefix\)[\s\S]*end desc/i);
 });
 
-test("tentativa de inventar postal_zone não usa coordenadas nem zone_id do navegador", async () => {
-  const { migration } = await sources();
-  assert.match(migration, /select zone\.\* into v_postal_zone[\s\S]*from public\.delivery_postal_zones zone[\s\S]*where zone\.postal_code = v_postal_code and zone\.active/i);
-  assert.match(migration, /v_latitude := null;[\s\S]*v_longitude := null;/i);
-  assert.doesNotMatch(migration, /p_order->>'zone_id'/i);
+test("range funciona e a faixa mais estreita é mais específica", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /request\.postal_code between zone\.postal_code_start and zone\.postal_code_end/i);
+  assert.match(rulesMigration, /when 'range' then -\(\(zone\.postal_code_end::bigint\) - \(zone\.postal_code_start::bigint\)\)/i);
 });
 
-test("migration preserva place_order legado e pedidos históricos", async () => {
-  const { migration, legacy } = await sources();
+test("neighborhood normaliza acentos, caixa e espaços e permanece menos específico", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /normalize_delivery_neighborhood/i);
+  assert.match(rulesMigration, /translate\([\s\S]*lower\(coalesce\(p_value, ''\)\)/i);
+  assert.match(rulesMigration, /regexp_replace\([\s\S]*'\\s\+'/i);
+  assert.match(rulesMigration, /zone\.match_type = 'neighborhood'[\s\S]*normalize_delivery_neighborhood\(zone\.neighborhood\) = request\.neighborhood/i);
+});
+
+test("regra inativa é ignorada e priority desempata regras equivalentes", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /where zone\.active/i);
+  assert.match(rulesMigration, /zone\.priority desc/i);
+  assert.match(rulesMigration, /zone\.created_at asc,[\s\S]*zone\.id asc/i);
+});
+
+test("place_order_v2 repete a resolução e rejeita endereço sem regra", async () => {
+  const { rulesMigration } = await sources();
+  const postalBranch = rulesMigration.slice(rulesMigration.indexOf("if v_location_source = 'postal_zone' then"), rulesMigration.indexOf("else", rulesMigration.indexOf("if v_location_source = 'postal_zone' then")));
+  assert.match(postalBranch, /p_order->>'postal_code'/i);
+  assert.match(postalBranch, /p_order->>'neighborhood'/i);
+  assert.match(postalBranch, /resolve_delivery_area\(v_postal_code, v_neighborhood\)/i);
+  assert.match(postalBranch, /if not found then raise exception 'DELIVERY_ZONE_NOT_FOUND'/i);
+});
+
+test("taxa financeira vem do banco e dados inventados pelo frontend são ignorados", async () => {
+  const { rulesMigration } = await sources();
+  assert.match(rulesMigration, /v_delivery_fee := v_delivery_area\.delivery_fee/i);
+  assert.match(rulesMigration, /v_latitude := null;[\s\S]*v_longitude := null;[\s\S]*v_distance := null;/i);
+  assert.doesNotMatch(rulesMigration, /p_order->>'(?:delivery_fee|total|zone_id|priority|match_type)'/i);
+  assert.match(rulesMigration, /v_card_fee := round\(\(v_subtotal \+ v_delivery_fee\) \* v_settings\.card_fee_percent \/ 100, 2\)/i);
+  assert.match(rulesMigration, /v_total := v_subtotal \+ v_delivery_fee \+ v_card_fee/i);
+});
+
+test("place_order legado e compatibilidade histórica permanecem intactos", async () => {
+  const { rulesMigration, legacy } = await sources();
   assert.match(legacy, /create or replace function public\.place_order\(p_order jsonb\)/i);
-  assert.doesNotMatch(migration, /function public\.place_order\s*\(/i);
-  assert.doesNotMatch(migration, /(?:drop|truncate|delete from) public\.orders/i);
-  assert.match(migration, /create or replace function public\.place_order_v2\(p_order jsonb\)/i);
-  assert.match(migration, /location_source is null[\s\S]*postal_zone/i);
+  assert.doesNotMatch(rulesMigration, /function public\.place_order\s*\(/i);
+  assert.match(rulesMigration, /'nominatim_exact', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone'/i);
+  assert.match(rulesMigration, /public\.haversine_distance_km/i);
+  assert.match(rulesMigration, /maximum_delivery_distance_km/i);
 });
 
-test("alterar endereço invalida zona e taxa anteriores", async () => {
+test("alterar endereço invalida regra e taxa anteriores", async () => {
   const { app } = await sources();
   const setter = app.slice(app.indexOf("function setCheckoutField"), app.indexOf("function resolveDeliveryCoordinates"));
   assert.match(setter, /DELIVERY_ADDRESS_FIELDS\.has\(field\)/);
@@ -126,49 +150,48 @@ test("alterar endereço invalida zona e taxa anteriores", async () => {
   assert.match(setter, /setAddressValidationStatus\(\{ type: "idle", message: "" \}\)/);
 });
 
-test("GPS aparece somente após ADDRESS_NOT_PRECISE sem zona e não exige PIN", async () => {
+test("checkout recusa endereço sem regra e não oferece GPS, PIN ou mapa", async () => {
   const { app } = await sources();
-  const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("async function requestAndAcceptDeviceLocation"));
+  const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
   assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
-  assert.match(validation, /findDeliveryPostalZone/);
-  assert.match(validation, /if \(location\)[\s\S]*else \{[\s\S]*type: "needs-gps"/);
-  assert.doesNotMatch(validation, /openMapPicker/);
-  assert.match(app, /Você está no endereço de entrega agora\?/);
-  assert.match(app, /Sim, usar minha localização/);
-  assert.match(app, /Não, revisar endereço/);
+  assert.match(validation, /resolveDeliveryArea\(checkout\.postalCode, checkout\.neighborhood/);
+  assert.match(validation, /type: "unavailable"/);
+  assert.match(app, /Este endereço ainda não está disponível para entrega\./);
+  assert.doesNotMatch(app, /requestDeviceGps|MapLocationPicker|Você está no endereço de entrega agora|Sim, usar minha localização/);
 });
 
-test("cliente distante pode pedir para postal_zone sem GPS", () => {
-  const location = createPostalZoneLocation({ postal_code: "23036060", delivery_fee: 5 }, "23036-060");
-  assert.equal(isTrustedDeliveryLocation(location), true);
-  assert.equal("accuracy" in location, false);
-  assert.equal(evaluateOrderDelivery("entrega", location, [], {}).allowed, true);
-});
-
-test("checkout e WhatsApp ocultam detalhes técnicos e suportam distância nula", async () => {
+test("checkout e WhatsApp ocultam a regra e suportam distância nula", async () => {
   const { app } = await sources();
   const statusCard = app.slice(app.indexOf("function LocationStatusCard"), app.indexOf("function PixPaymentCard"));
-  assert.doesNotMatch(statusCard, /postal_zone|zona postal|Nominatim|coordenad|consenso|margem/i);
+  assert.doesNotMatch(statusCard, /postal_zone|prefixo|bairro|regra|Nominatim|coordenad/i);
   assert.match(statusCard, /Taxa de entrega/);
   assert.match(statusCard, /Number\.isFinite\(Number\(location\.km\)\)/);
   assert.match(app, /order\.distance_km != null/);
   assert.match(app, /composeDeliveryAddress\(checkout\)/);
 });
 
-test("Admin oferece CRUD mobile-first para áreas por CEP", async () => {
-  const { admin, styles } = await sources();
-  assert.match(admin, /Áreas de entrega por CEP/);
-  assert.match(admin, /Adicionar CEP/);
+test("Admin gerencia os quatro tipos de área em layout mobile-first", async () => {
+  const { admin, styles, api } = await sources();
+  assert.match(admin, /Áreas de entrega/);
+  assert.match(admin, /Adicionar área/);
+  for (const label of ["CEP exato", "Prefixo de CEP", "Faixa de CEP", "Bairro"]) assert.match(admin, new RegExp(label));
+  for (const field of ["postal_code", "postal_prefix", "postal_code_start", "postal_code_end", "neighborhood", "priority"]) assert.match(api, new RegExp(`${field}:`, "i"));
   for (const action of ["Editar", "Ativar", "Desativar", "Excluir"]) assert.match(admin, new RegExp(action));
-  assert.match(admin, /Taxa de entrega \(R\$\)/);
   assert.match(styles, /@media \(max-width: 720px\)[\s\S]*\.postal-zone-row[\s\S]*flex-direction: column/i);
 });
 
-test("Pix, crédito, débito e layout atual permanecem presentes", async () => {
-  const { app, migration } = await sources();
+test("retirada, Pix, crédito e débito permanecem compatíveis", async () => {
+  const { app, rulesMigration } = await sources();
+  assert.deepEqual(evaluateOrderDelivery("retirada", null, [], {}), { allowed: true, fee: 0, code: "PICKUP", message: "Retirada no local." });
   assert.match(app, /showQrCode && <div className="pix-qr-frame">/);
   assert.match(app, /Copiar chave Pix/);
   assert.match(app, /checkout\.payment === "credito"/);
   assert.match(app, /checkout\.payment === "debito"/);
-  assert.match(migration, /v_payment_method in \('credito', 'debito'\)/);
+  assert.match(rulesMigration, /v_payment_method in \('credito', 'debito'\)/);
+});
+
+test("migration anterior permanece incremental e sem CEPs hardcoded", async () => {
+  const { firstMigration, rulesMigration } = await sources();
+  assert.match(firstMigration, /create table if not exists public\.delivery_postal_zones/i);
+  for (const postalCode of ["23036-061", "23036-076", "23036-060", "23036-050", "23036061", "23036076", "23036060", "23036050"]) assert.doesNotMatch(rulesMigration, new RegExp(postalCode));
 });

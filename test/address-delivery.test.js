@@ -251,13 +251,15 @@ test("provedor automático delega somente à resolução exata do Nominatim", as
   );
 });
 
-test("checkout consulta zona após ADDRESS_NOT_PRECISE e só então oferece GPS, sem abrir mapa", async () => {
+test("checkout consulta regra por CEP e bairro após ADDRESS_NOT_PRECISE, sem GPS ou mapa", async () => {
   const app = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
-  const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("async function requestAndAcceptDeviceLocation"));
+  const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
   assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
-  assert.match(validation, /findDeliveryPostalZone\(checkout\.postalCode/);
-  assert.match(validation, /createPostalZoneLocation\(zone, checkout\.postalCode\)/);
-  assert.match(validation, /type: "needs-gps"/);
+  assert.match(validation, /resolveDeliveryArea\(checkout\.postalCode, checkout\.neighborhood/);
+  assert.match(validation, /createPostalZoneLocation\(zone, checkout\.postalCode, checkout\.neighborhood\)/);
+  assert.match(validation, /type: "unavailable"/);
+  assert.match(validation, /Este endereço ainda não está disponível para entrega\./);
+  assert.doesNotMatch(validation, /requestDeviceGps|device_gps/);
   assert.doesNotMatch(validation, /openMapPicker\(/);
 });
 
@@ -284,7 +286,7 @@ test("retirada no local continua sem exigir localização", () => {
   });
 });
 
-test("GPS existente permanece funcional e não é consultado pela resolução automática", async () => {
+test("suporte histórico de GPS permanece isolado e não é consultado pela resolução automática", async () => {
   assert.equal(MAX_DEVICE_GPS_ACCURACY_M, 150);
   assert.throws(() => coordinatesAtDistance(0.6, 200), (error) => error.code === "GPS_INACCURATE");
   assert.deepEqual(DEVICE_GPS_OPTIONS, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });

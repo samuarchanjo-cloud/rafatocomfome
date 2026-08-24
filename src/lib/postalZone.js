@@ -2,13 +2,17 @@ function postalCodeDigits(value) {
   return String(value || "").replace(/\D/g, "").slice(0, 8);
 }
 
-export function createPostalZoneLocation(zone, requestedPostalCode) {
+const MATCH_TYPES = new Set(["exact", "prefix", "range", "neighborhood"]);
+
+export function createPostalZoneLocation(zone, requestedPostalCode, requestedNeighborhood = "") {
   const postalCode = postalCodeDigits(requestedPostalCode);
-  const zonePostalCode = postalCodeDigits(zone?.postalCode || zone?.postal_code);
   const deliveryFee = Number(zone?.deliveryFee ?? zone?.delivery_fee);
+  const matchType = zone?.matchType || zone?.match_type;
+  const ruleId = String(zone?.id || "").trim();
   if (
     postalCode.length !== 8 ||
-    zonePostalCode !== postalCode ||
+    !ruleId ||
+    !MATCH_TYPES.has(matchType) ||
     !Number.isFinite(deliveryFee) ||
     deliveryFee < 0
   ) {
@@ -19,6 +23,9 @@ export function createPostalZoneLocation(zone, requestedPostalCode) {
     source: "postal_zone",
     precision: "administrative",
     postalCode,
+    neighborhood: String(requestedNeighborhood || "").trim(),
+    ruleId,
+    matchType,
     deliveryFee,
     km: null,
     centerKm: null,

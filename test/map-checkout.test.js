@@ -118,13 +118,13 @@ test("CEPs de regressão podem usar confirmação por PIN na região encontrada"
   }
 });
 
-test("checkout contém mapa lazy, quatro pagamentos e Pix tolerante a QR ausente", async () => {
+test("checkout não carrega mapa ou GPS e preserva pagamentos e Pix", async () => {
   const [app, mapPicker, styles] = await Promise.all([
     readFile(new URL("../src/App.jsx", import.meta.url), "utf8"),
     readFile(new URL("../src/components/MapLocationPicker.jsx", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
   ]);
-  assert.match(app, /lazy\(\(\) => import\("\.\/components\/MapLocationPicker"\)\)/);
+  assert.doesNotMatch(app, /MapLocationPicker|requestDeviceGps|Você está no endereço de entrega agora/);
   assert.match(mapPicker, /Confirmar este local/);
   assert.match(mapPicker, /Voltar e revisar endereço/);
   assert.match(mapPicker, /Usar minha localização atual/);

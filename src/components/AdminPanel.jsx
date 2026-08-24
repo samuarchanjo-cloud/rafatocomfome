@@ -46,7 +46,7 @@ const TABS = [
   ["orders", "Pedidos", ShoppingBag],
   ["hours", "Horários", Clock3],
   ["delivery", "Taxas de entrega", Truck],
-  ["postal-zones", "Áreas por CEP", MapPin],
+  ["postal-zones", "Áreas de entrega", MapPin],
   ["settings", "Configurações", Settings],
 ];
 
@@ -447,7 +447,34 @@ function DeliveryManager({ ranges, settings, reloadStore, showNotice }) {
   </div>;
 }
 
-const EMPTY_POSTAL_ZONE = { postal_code: "", label: "", delivery_fee: "", active: true };
+const DELIVERY_AREA_TYPES = {
+  exact: "CEP exato",
+  prefix: "Prefixo de CEP",
+  range: "Faixa de CEP",
+  neighborhood: "Bairro",
+};
+
+const EMPTY_POSTAL_ZONE = {
+  match_type: "exact",
+  postal_code: "",
+  postal_prefix: "",
+  postal_code_start: "",
+  postal_code_end: "",
+  neighborhood: "",
+  label: "",
+  delivery_fee: "",
+  priority: 0,
+  active: true,
+};
+
+function deliveryAreaRuleLabel(zone) {
+  if (zone.match_type === "prefix") return `${zone.postal_prefix || ""}*`;
+  if (zone.match_type === "range") {
+    return `${formatPostalCode(zone.postal_code_start)} até ${formatPostalCode(zone.postal_code_end)}`;
+  }
+  if (zone.match_type === "neighborhood") return zone.neighborhood || "Bairro não informado";
+  return formatPostalCode(zone.postal_code);
+}
 
 function PostalZoneManager({ showNotice }) {
   const [zones, setZones] = useState([]);
@@ -482,10 +509,18 @@ function PostalZoneManager({ showNotice }) {
 
   async function submit(event) {
     event.preventDefault();
-    if (postalCodeDigits(draft.postal_code).length !== 8) {
-      showNotice("Informe um CEP válido com 8 dígitos.", "error");
-      return;
-    }
+    const matchType = draft.match_type || "exact";
+    const exactValid = matchType !== "exact" || postalCodeDigits(draft.postal_code).length === 8;
+    const prefixLength = postalCodeDigits(draft.postal_prefix).length;
+    const prefixValid = matchType !== "prefix" || (prefixLength >= 1 && prefixLength <= 8);
+    const start = postalCodeDigits(draft.postal_code_start);
+    const end = postalCodeDigits(draft.postal_code_end);
+    const rangeValid = matchType !== "range" || (start.length === 8 && end.length === 8 && start <= end);
+    const neighborhoodValid = matchType !== "neighborhood" || Boolean(draft.neighborhood?.trim());
+    if (!exactValid) return showNotice("Informe um CEP exato válido com 8 dígitos.", "error");
+    if (!prefixValid) return showNotice("Informe um prefixo de CEP com 1 a 8 dígitos.", "error");
+    if (!rangeValid) return showNotice("Informe uma faixa de CEP válida, do menor para o maior.", "error");
+    if (!neighborhoodValid) return showNotice("Informe o bairro da área de entrega.", "error");
     if (draft.delivery_fee === "" || !Number.isFinite(Number(draft.delivery_fee)) || Number(draft.delivery_fee) < 0) {
       showNotice("Informe uma taxa de entrega válida.", "error");
       return;
@@ -495,7 +530,7 @@ function PostalZoneManager({ showNotice }) {
       await saveDeliveryPostalZone(draft, isNew);
       await reload();
       setDraft(null);
-      showNotice(isNew ? "Área por CEP adicionada." : "Área por CEP atualizada.", "success");
+      showNotice(isNew ? "Área de entrega adicionada." : "Área de entrega atualizada.", "success");
     } catch (saveError) {
       showNotice(errorMessage(saveError), "error");
     } finally {
@@ -514,28 +549,33 @@ function PostalZoneManager({ showNotice }) {
   }
 
   async function remove(zone) {
-    if (!window.confirm(`Excluir a área do CEP ${formatPostalCode(zone.postal_code)}?`)) return;
+    if (!window.confirm(`Excluir a área ${deliveryAreaRuleLabel(zone)}?`)) return;
     try {
       await deleteDeliveryPostalZone(zone.id);
       await reload();
-      showNotice("Área por CEP excluída.", "success");
+      showNotice("Área de entrega excluída.", "success");
     } catch (deleteError) {
       showNotice(errorMessage(deleteError), "error");
     }
   }
 
   return <div className="admin-section">
-    <div className="admin-section-title"><div><h2>Áreas de entrega por CEP</h2><span>Taxas administrativas para endereços sem coordenada exata</span></div><button className="admin-primary" type="button" onClick={() => start()}><Plus size={17} />Adicionar CEP</button></div>
+    <div className="admin-section-title"><div><h2>Áreas de entrega</h2><span>Regras administrativas para endereços sem coordenada exata</span></div><button className="admin-primary" type="button" onClick={() => start()}><Plus size={17} />Adicionar área</button></div>
     {draft && <form className="admin-editor" onSubmit={submit}>
-      <div className="editor-heading"><h3>{isNew ? "Nova área por CEP" : "Editar área por CEP"}</h3><button type="button" onClick={() => setDraft(null)}><X size={19} /></button></div>
-      <div className="field-row three"><label>CEP<input required inputMode="numeric" value={formatPostalCode(draft.postal_code)} onChange={(event) => change("postal_code", postalCodeDigits(event.target.value))} /></label><label>Descrição opcional<input value={draft.label || ""} onChange={(event) => change("label", event.target.value)} placeholder="Parque / nome da rua" /></label><label>Taxa de entrega (R$)<input required type="number" min="0" step="0.01" value={draft.delivery_fee} onChange={(event) => change("delivery_fee", event.target.value)} /></label></div>
+      <div className="editor-heading"><h3>{isNew ? "Nova área de entrega" : "Editar área de entrega"}</h3><button type="button" onClick={() => setDraft(null)}><X size={19} /></button></div>
+      <label>Tipo de regra<select value={draft.match_type || "exact"} onChange={(event) => change("match_type", event.target.value)}>{Object.entries(DELIVERY_AREA_TYPES).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+      {(draft.match_type || "exact") === "exact" && <label>CEP exato<input required inputMode="numeric" value={formatPostalCode(draft.postal_code)} onChange={(event) => change("postal_code", postalCodeDigits(event.target.value))} /></label>}
+      {draft.match_type === "prefix" && <label>Prefixo de CEP<input required inputMode="numeric" maxLength={8} value={draft.postal_prefix || ""} onChange={(event) => change("postal_prefix", postalCodeDigits(event.target.value))} placeholder="Ex.: 230360" /></label>}
+      {draft.match_type === "range" && <div className="field-row"><label>CEP inicial<input required inputMode="numeric" value={formatPostalCode(draft.postal_code_start)} onChange={(event) => change("postal_code_start", postalCodeDigits(event.target.value))} /></label><label>CEP final<input required inputMode="numeric" value={formatPostalCode(draft.postal_code_end)} onChange={(event) => change("postal_code_end", postalCodeDigits(event.target.value))} /></label></div>}
+      {draft.match_type === "neighborhood" && <label>Bairro<input required value={draft.neighborhood || ""} onChange={(event) => change("neighborhood", event.target.value)} placeholder="Ex.: Guaratiba" /></label>}
+      <div className="field-row three"><label>Descrição opcional<input value={draft.label || ""} onChange={(event) => change("label", event.target.value)} placeholder="Nome interno da área" /></label><label>Taxa de entrega (R$)<input required type="number" min="0" step="0.01" value={draft.delivery_fee} onChange={(event) => change("delivery_fee", event.target.value)} /></label><label>Prioridade<input type="number" step="1" value={draft.priority ?? 0} onChange={(event) => change("priority", event.target.value)} /></label></div>
       <label className="admin-check"><input type="checkbox" checked={draft.active !== false} onChange={(event) => change("active", event.target.checked)} />Área ativa</label>
-      <button className="admin-primary wide" disabled={saving}><Save size={17} />{saving ? "Salvando..." : "Salvar área por CEP"}</button>
+      <button className="admin-primary wide" disabled={saving}><Save size={17} />{saving ? "Salvando..." : "Salvar área"}</button>
     </form>}
-    {loading && <p className="empty">Carregando áreas por CEP...</p>}
+    {loading && <p className="empty">Carregando áreas de entrega...</p>}
     {error && <div className="admin-warning">{error}</div>}
-    {!loading && !error && <div className="admin-card-list">{zones.map((zone) => <article className="fee-row postal-zone-row" key={zone.id}><div><strong>{formatPostalCode(zone.postal_code)}</strong><span>{zone.label || "Sem descrição"}</span><span>{money(zone.delivery_fee)} · {zone.active ? "Ativo" : "Inativo"}</span></div><div className="row-actions"><button type="button" onClick={() => start(zone)}>Editar</button><button type="button" onClick={() => toggle(zone)}>{zone.active ? "Desativar" : "Ativar"}</button><button className="danger" type="button" onClick={() => remove(zone)}><Trash2 size={16} /></button></div></article>)}</div>}
-    {!loading && !error && zones.length === 0 && <p className="empty">Nenhuma área por CEP cadastrada.</p>}
+    {!loading && !error && <div className="admin-card-list">{zones.map((zone) => <article className="fee-row postal-zone-row" key={zone.id}><div><span>{DELIVERY_AREA_TYPES[zone.match_type] || "CEP exato"}</span><strong>{deliveryAreaRuleLabel(zone)}</strong><span>{zone.label || "Sem descrição"}</span><span>{money(zone.delivery_fee)} · prioridade {Number(zone.priority) || 0} · {zone.active ? "Ativo" : "Inativo"}</span></div><div className="row-actions"><button type="button" onClick={() => start(zone)}>Editar</button><button type="button" onClick={() => toggle(zone)}>{zone.active ? "Desativar" : "Ativar"}</button><button className="danger" type="button" aria-label="Excluir" onClick={() => remove(zone)}><Trash2 size={16} /></button></div></article>)}</div>}
+    {!loading && !error && zones.length === 0 && <p className="empty">Nenhuma área de entrega cadastrada.</p>}
   </div>;
 }
 
