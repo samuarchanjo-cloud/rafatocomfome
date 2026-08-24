@@ -2,7 +2,7 @@ function postalCodeDigits(value) {
   return String(value || "").replace(/\D/g, "").slice(0, 8);
 }
 
-const MATCH_TYPES = new Set(["exact", "prefix", "range"]);
+const MATCH_TYPES = new Set(["exact"]);
 
 export function createPostalZoneLocation(zone, requestedPostalCode) {
   const postalCode = postalCodeDigits(requestedPostalCode);

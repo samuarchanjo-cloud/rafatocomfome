@@ -448,7 +448,7 @@ function DeliveryManager({ ranges, settings, reloadStore, showNotice }) {
 }
 
 const DELIVERY_AREA_TYPES = {
-  exact: "CEP exato",
+  exact: "CEP exato — Exceção de geolocalização",
   prefix: "Prefixo de CEP",
   range: "Faixa de CEP",
   neighborhood: "Bairro",
@@ -560,10 +560,11 @@ function PostalZoneManager({ showNotice }) {
   }
 
   return <div className="admin-section">
-    <div className="admin-section-title"><div><h2>Áreas de entrega</h2><span>Regras administrativas para endereços sem coordenada exata</span></div><button className="admin-primary" type="button" onClick={() => start()}><Plus size={17} />Adicionar área</button></div>
+    <div className="admin-section-title"><div><h2>Áreas de entrega</h2><span>Lista de exceções para CEPs cuja geolocalização automática está incorreta</span></div><button className="admin-primary" type="button" onClick={() => start()}><Plus size={17} />Adicionar área</button></div>
     {draft && <form className="admin-editor" onSubmit={submit}>
       <div className="editor-heading"><h3>{isNew ? "Nova área de entrega" : "Editar área de entrega"}</h3><button type="button" onClick={() => setDraft(null)}><X size={19} /></button></div>
       <label>Tipo de regra<select value={draft.match_type || "exact"} onChange={(event) => change("match_type", event.target.value)}>{Object.entries(DELIVERY_AREA_TYPES).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+      {(draft.match_type || "exact") === "exact" && <div className="admin-warning"><strong>Exceção de geolocalização</strong><br /><span>Use apenas para CEPs cuja localização automática esteja incorreta.</span></div>}
       {(draft.match_type || "exact") === "exact" && <label>CEP exato<input required inputMode="numeric" value={formatPostalCode(draft.postal_code)} onChange={(event) => change("postal_code", postalCodeDigits(event.target.value))} /></label>}
       {draft.match_type === "prefix" && <label>Prefixo de CEP<input required inputMode="numeric" maxLength={8} value={draft.postal_prefix || ""} onChange={(event) => change("postal_prefix", postalCodeDigits(event.target.value))} placeholder="Ex.: 230360" /></label>}
       {draft.match_type === "range" && <div className="field-row"><label>CEP inicial<input required inputMode="numeric" value={formatPostalCode(draft.postal_code_start)} onChange={(event) => change("postal_code_start", postalCodeDigits(event.target.value))} /></label><label>CEP final<input required inputMode="numeric" value={formatPostalCode(draft.postal_code_end)} onChange={(event) => change("postal_code_end", postalCodeDigits(event.target.value))} /></label></div>}

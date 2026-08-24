@@ -24,7 +24,8 @@ export function effectiveDeliveryDistance(centerDistanceKm, location) {
 
 export function evaluateDelivery(distance, ranges, settings, precision = "exact") {
   const isConsensus = precision === "consensus";
-  if (precision !== "exact" && !isConsensus) {
+  const isStreetFallback = precision === "street";
+  if (precision !== "exact" && !isConsensus && !isStreetFallback) {
     return {
       allowed: false,
       fee: 0,

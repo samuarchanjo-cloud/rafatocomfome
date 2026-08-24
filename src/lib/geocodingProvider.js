@@ -70,6 +70,6 @@ export function mapCandidateFromError(error) {
   return sources.find((source) => source.source === "awesomeapi_cep") || sources[0] || null;
 }
 
-export async function locateDeliveryAddress(address, { signal } = {}) {
-  return geocodeDeliveryAddress(address, { signal });
+export async function locateDeliveryAddress(address, { signal, postalAddress } = {}) {
+  return geocodeDeliveryAddress(address, { signal, postalAddress });
 }

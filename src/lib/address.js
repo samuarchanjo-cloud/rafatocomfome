@@ -116,6 +116,25 @@ function isPreciseAddressCandidate(candidate, address) {
   );
 }
 
+function isStreetAddressCandidate(candidate, address) {
+  const details = candidate?.address || {};
+  const latitude = Number(candidate?.lat);
+  const longitude = Number(candidate?.lon);
+  const expectedPostalCode = postalCodeDigits(address.postalCode);
+  const returnedPostalCode = postalCodeDigits(details.postcode);
+  const returnedStreet = details.road || details.pedestrian || details.residential || details.street;
+
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    details.country_code === "br" &&
+    matchesStreet(address.street, returnedStreet) &&
+    matchesCity(address.city, details) &&
+    matchesState(address.state, details) &&
+    (!returnedPostalCode || returnedPostalCode === expectedPostalCode)
+  );
+}
+
 function isPostalAddressCompatible(address, postalAddress) {
   return Boolean(
     postalCodeDigits(postalAddress.postalCode) === postalCodeDigits(address.postalCode) &&
@@ -270,11 +289,26 @@ export async function lookupPostalCode(value, { signal } = {}) {
 }
 
 /** @param {Record<string, string>} address @param {{ signal?: AbortSignal }} [options] */
-export async function geocodeDeliveryAddress(address, { signal } = {}) {
+export async function validateDeliveryPostalAddress(address, { signal } = {}) {
   const validationMessage = validateDeliveryAddressFields(address);
   if (validationMessage) throw addressError("INVALID_ADDRESS", validationMessage);
 
   const postalAddress = await lookupPostalCode(address.postalCode, { signal });
+  if (!isPostalAddressCompatible(address, postalAddress)) {
+    throw addressError(
+      "ADDRESS_POSTAL_CODE_MISMATCH",
+      "O CEP não corresponde à rua, cidade ou estado informado. Revise os dados do endereço.",
+    );
+  }
+  return postalAddress;
+}
+
+/** @param {Record<string, string>} address @param {{ signal?: AbortSignal, postalAddress?: Record<string, string> }} [options] */
+export async function geocodeDeliveryAddress(address, { signal, postalAddress: suppliedPostalAddress } = {}) {
+  const validationMessage = validateDeliveryAddressFields(address);
+  if (validationMessage) throw addressError("INVALID_ADDRESS", validationMessage);
+
+  const postalAddress = suppliedPostalAddress || await validateDeliveryPostalAddress(address, { signal });
   if (!isPostalAddressCompatible(address, postalAddress)) {
     throw addressError(
       "ADDRESS_POSTAL_CODE_MISMATCH",
@@ -307,23 +341,56 @@ export async function geocodeDeliveryAddress(address, { signal } = {}) {
   const preciseCandidate = Array.isArray(candidates)
     ? candidates.find((candidate) => isPreciseAddressCandidate(candidate, address))
     : null;
-  if (!preciseCandidate) {
+  if (preciseCandidate) {
+    const result = {
+      latitude: Number(preciseCandidate.lat),
+      longitude: Number(preciseCandidate.lon),
+      displayName: preciseCandidate.display_name,
+      precision: "exact",
+      source: "nominatim_exact",
+      postalCode: formatPostalCode(preciseCandidate.address?.postcode || address.postalCode),
+      type: preciseCandidate.type || null,
+      addresstype: preciseCandidate.addresstype || null,
+    };
+    geocodingCache.set(cacheKey, result);
+    return result;
+  }
+
+  const streetQuery = [
+    address.street.trim(),
+    address.neighborhood.trim(),
+    `${address.city.trim()} - ${address.state.trim()}`,
+    formatPostalCode(address.postalCode),
+    "Brasil",
+  ].join(", ");
+  await waitForNominatimRateLimit();
+  const streetParameters = new URLSearchParams({
+    q: streetQuery,
+    format: "jsonv2",
+    addressdetails: "1",
+    countrycodes: "br",
+    limit: "5",
+    "accept-language": "pt-BR",
+  });
+  const streetCandidates = await requestNominatimCandidates(streetParameters, signal);
+  const streetCandidate = Array.isArray(streetCandidates)
+    ? streetCandidates.find((candidate) => isStreetAddressCandidate(candidate, address))
+    : null;
+  if (!streetCandidate) {
     throw addressError(
       "ADDRESS_NOT_PRECISE",
-      "O endereço não pôde ser localizado com precisão. Revise CEP, rua, número, bairro e cidade.",
+      "O endereço não pôde ser localizado. Revise CEP, rua, número, bairro e cidade.",
     );
   }
 
-  const result = {
-    latitude: Number(preciseCandidate.lat),
-    longitude: Number(preciseCandidate.lon),
-    displayName: preciseCandidate.display_name,
-    precision: "exact",
-    source: "nominatim_exact",
-    postalCode: formatPostalCode(preciseCandidate.address?.postcode || address.postalCode),
-    type: preciseCandidate.type || null,
-    addresstype: preciseCandidate.addresstype || null,
+  return {
+    latitude: Number(streetCandidate.lat),
+    longitude: Number(streetCandidate.lon),
+    displayName: streetCandidate.display_name,
+    precision: "street",
+    source: "nominatim_street",
+    postalCode: formatPostalCode(streetCandidate.address?.postcode || address.postalCode),
+    type: streetCandidate.type || null,
+    addresstype: streetCandidate.addresstype || null,
   };
-  geocodingCache.set(cacheKey, result);
-  return result;
 }

@@ -7,7 +7,7 @@ export const DEVICE_GPS_OPTIONS = Object.freeze({
   maximumAge: 0,
 });
 
-const TRUSTED_EXACT_LOCATION_SOURCES = new Set(["nominatim_exact", "google_exact", "device_gps", "map_pin"]);
+const TRUSTED_LOCATION_SOURCES = new Set(["nominatim_exact", "nominatim_street", "google_exact", "device_gps", "map_pin"]);
 
 function locationError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -23,7 +23,7 @@ export function isTrustedDeliveryLocation(location) {
       location.precision === "administrative" &&
       /^\d{8}$/.test(String(location.postalCode || "")) &&
       Boolean(String(location.ruleId || "").trim()) &&
-      ["exact", "prefix", "range"].includes(location.matchType) &&
+      location.matchType === "exact" &&
       Number.isFinite(Number(location.deliveryFee)) &&
       Number(location.deliveryFee) >= 0
     );
@@ -50,8 +50,9 @@ export function isTrustedDeliveryLocation(location) {
     );
   }
 
-  if (location.precision !== "exact" || !TRUSTED_EXACT_LOCATION_SOURCES.has(location.source)) return false;
-  if (["nominatim_exact", "google_exact", "map_pin"].includes(location.source)) return true;
+  const expectedPrecision = location.source === "nominatim_street" ? "street" : "exact";
+  if (location.precision !== expectedPrecision || !TRUSTED_LOCATION_SOURCES.has(location.source)) return false;
+  if (["nominatim_exact", "nominatim_street", "google_exact", "map_pin"].includes(location.source)) return true;
 
   return (
     Number.isFinite(Number(location.accuracy)) &&

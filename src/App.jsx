@@ -25,6 +25,7 @@ import {
   formatPostalCode,
   lookupPostalCode,
   postalCodeDigits,
+  validateDeliveryPostalAddress,
   validateDeliveryAddressFields,
 } from "./lib/address";
 import { getBusinessStatus } from "./lib/businessHours";
@@ -362,7 +363,19 @@ function App() {
     setValidatingAddress(true);
     setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
     try {
-      const coordinates = await locateDeliveryAddress(checkout, { signal: controller.signal });
+      const postalAddress = await validateDeliveryPostalAddress(checkout, { signal: controller.signal });
+      setAddressValidationStatus({ type: "loading", message: "Verificando disponibilidade da entrega..." });
+      const zone = await resolveDeliveryArea(checkout.postalCode, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const administrativeLocation = createPostalZoneLocation(zone, checkout.postalCode);
+      if (administrativeLocation) {
+        setDeliveryLocation(administrativeLocation);
+        setAddressValidationStatus({ type: "success", message: "Entrega disponível para o endereço informado." });
+        return;
+      }
+
+      setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
+      const coordinates = await locateDeliveryAddress(checkout, { signal: controller.signal, postalAddress });
       if (!isTrustedDeliveryLocation(coordinates)) {
         setAddressValidationStatus({ type: "error", message: "O endereço não pôde ser localizado com precisão." });
         return;
@@ -371,27 +384,10 @@ function App() {
     } catch (error) {
       if (error.name === "AbortError") return;
       if (error.code === "ADDRESS_NOT_PRECISE") {
-        try {
-          setAddressValidationStatus({ type: "loading", message: "Verificando disponibilidade da entrega..." });
-          const zone = await resolveDeliveryArea(checkout.postalCode, { signal: controller.signal });
-          if (controller.signal.aborted) return;
-          const location = createPostalZoneLocation(zone, checkout.postalCode);
-          if (location) {
-            setDeliveryLocation(location);
-            setAddressValidationStatus({ type: "success", message: "Entrega disponível para o endereço informado." });
-          } else {
-            setAddressValidationStatus({
-              type: "unavailable",
-              message: "Este endereço ainda não está disponível para entrega.",
-            });
-          }
-        } catch (zoneError) {
-          if (zoneError.name === "AbortError") return;
-          setAddressValidationStatus({
-            type: "error",
-            message: "Não foi possível verificar a disponibilidade para este CEP agora. Tente novamente.",
-          });
-        }
+        setAddressValidationStatus({
+          type: "unavailable",
+          message: "Este endereço ainda não está disponível para entrega.",
+        });
         return;
       }
       setAddressValidationStatus({

@@ -37,6 +37,15 @@ test("postal_zone usa a regra resolvida sem coordenada ou distância fictícia",
   assert.deepEqual(assessment, { allowed: true, fee: 3, code: "POSTAL_ZONE", message: "Entrega disponível para o endereço informado." });
 });
 
+test("CEPs 23036-061 e 23036-076 cadastrados como exact usam postal_zone", () => {
+  for (const postalCode of ["23036-061", "23036-076"]) {
+    const location = createPostalZoneLocation(resolvedRule({ id: `exact-${postalCode}`, matchType: "exact" }), postalCode);
+    assert.equal(location.source, "postal_zone");
+    assert.equal(location.matchType, "exact");
+    assert.equal(location.km, null);
+  }
+});
+
 test("resultado administrativo inválido não vira localização confiável", () => {
   assert.equal(createPostalZoneLocation(null, "23036-061"), null);
   assert.equal(createPostalZoneLocation(resolvedRule({ id: "" }), "23036-061"), null);
@@ -82,22 +91,21 @@ test("RPC público anterior continua compatível com regras baseadas em CEP", as
   assert.match(rulesMigration, /grant execute on function public\.get_delivery_postal_zone\(text\) to anon, authenticated/i);
 });
 
-test("exact funciona e vence prefix e range", async () => {
+test("resolver financeiro aceita somente exact, ignorando prefix, range e neighborhood", async () => {
   const { rulesMigration } = await sources();
-  assert.match(rulesMigration, /zone\.match_type = 'exact' and zone\.postal_code = request\.postal_code/i);
-  assert.match(rulesMigration, /when 'exact' then 1[\s\S]*when 'prefix' then 2[\s\S]*when 'range' then 3/i);
+  const resolver = rulesMigration.slice(rulesMigration.indexOf("create or replace function public.resolve_delivery_area"), rulesMigration.indexOf("create or replace function public.get_delivery_postal_zone"));
+  assert.match(resolver, /zone\.match_type = 'exact'[\s\S]*zone\.postal_code = request\.postal_code/i);
+  assert.doesNotMatch(resolver, /zone\.match_type = '(?:prefix|range|neighborhood)'/i);
 });
 
-test("prefix funciona e o maior prefixo vence o menor", async () => {
+test("prefix permanece disponível somente como estrutura futura", async () => {
   const { rulesMigration } = await sources();
-  assert.match(rulesMigration, /left\(request\.postal_code, length\(zone\.postal_prefix\)\) = zone\.postal_prefix/i);
-  assert.match(rulesMigration, /when 'prefix' then length\(zone\.postal_prefix\)[\s\S]*end desc/i);
+  assert.match(rulesMigration, /match_type = 'prefix'[\s\S]*postal_prefix ~ '\^\[0-9\]\{1,8\}\$'/i);
 });
 
-test("range funciona e a faixa mais estreita é mais específica", async () => {
+test("range permanece disponível somente como estrutura futura", async () => {
   const { rulesMigration } = await sources();
-  assert.match(rulesMigration, /request\.postal_code between zone\.postal_code_start and zone\.postal_code_end/i);
-  assert.match(rulesMigration, /when 'range' then -\(\(zone\.postal_code_end::bigint\) - \(zone\.postal_code_start::bigint\)\)/i);
+  assert.match(rulesMigration, /match_type = 'range'[\s\S]*postal_code_start <= postal_code_end/i);
 });
 
 test("neighborhood permanece no schema e Admin, mas é ignorado pela resolução financeira", async () => {
@@ -105,7 +113,7 @@ test("neighborhood permanece no schema e Admin, mas é ignorado pela resolução
   assert.match(rulesMigration, /normalize_delivery_neighborhood/i);
   const resolver = rulesMigration.slice(rulesMigration.indexOf("create or replace function public.resolve_delivery_area"), rulesMigration.indexOf("create or replace function public.get_delivery_postal_zone"));
   assert.doesNotMatch(resolver, /zone\.match_type = 'neighborhood'|request\.neighborhood|normalize_delivery_neighborhood\(zone\.neighborhood\)/i);
-  assert.match(resolver, /p_neighborhood é reservado para uso futuro/i);
+  assert.match(resolver, /Somente CEP exato funciona como exceção financeira/i);
 });
 
 test("CEP fora das regras com neighborhood adulterado como Guaratiba continua sem entrega", async () => {
@@ -118,7 +126,7 @@ test("CEP fora das regras com neighborhood adulterado como Guaratiba continua se
   assert.doesNotMatch(app, /resolveDeliveryArea\(checkout\.postalCode, checkout\.neighborhood/);
 });
 
-test("regra inativa é ignorada e priority desempata regras equivalentes", async () => {
+test("exceção exact inativa é ignorada e priority desempata duplicatas", async () => {
   const { rulesMigration } = await sources();
   assert.match(rulesMigration, /where zone\.active/i);
   assert.match(rulesMigration, /zone\.priority desc/i);
@@ -147,7 +155,7 @@ test("place_order legado e compatibilidade histórica permanecem intactos", asyn
   const { rulesMigration, legacy } = await sources();
   assert.match(legacy, /create or replace function public\.place_order\(p_order jsonb\)/i);
   assert.doesNotMatch(rulesMigration, /function public\.place_order\s*\(/i);
-  assert.match(rulesMigration, /'nominatim_exact', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone'/i);
+  assert.match(rulesMigration, /'nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone'/i);
   assert.match(rulesMigration, /public\.haversine_distance_km/i);
   assert.match(rulesMigration, /maximum_delivery_distance_km/i);
 });
@@ -160,11 +168,12 @@ test("alterar endereço invalida regra e taxa anteriores", async () => {
   assert.match(setter, /setAddressValidationStatus\(\{ type: "idle", message: "" \}\)/);
 });
 
-test("checkout recusa endereço sem regra e não oferece GPS, PIN ou mapa", async () => {
+test("checkout sem exceção exact continua no geocoder e não oferece GPS, PIN ou mapa", async () => {
   const { app } = await sources();
   const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
   assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
   assert.match(validation, /resolveDeliveryArea\(checkout\.postalCode, \{ signal:/);
+  assert.ok(validation.indexOf("resolveDeliveryArea") < validation.indexOf("locateDeliveryAddress"));
   assert.match(validation, /type: "unavailable"/);
   assert.match(app, /Este endereço ainda não está disponível para entrega\./);
   assert.doesNotMatch(app, /requestDeviceGps|MapLocationPicker|Você está no endereço de entrega agora|Sim, usar minha localização/);
@@ -184,6 +193,8 @@ test("Admin gerencia os quatro tipos de área em layout mobile-first", async () 
   const { admin, styles, api } = await sources();
   assert.match(admin, /Áreas de entrega/);
   assert.match(admin, /Adicionar área/);
+  assert.match(admin, /Exceção de geolocalização/);
+  assert.match(admin, /Use apenas para CEPs cuja localização automática esteja incorreta\./);
   for (const label of ["CEP exato", "Prefixo de CEP", "Faixa de CEP", "Bairro"]) assert.match(admin, new RegExp(label));
   for (const field of ["postal_code", "postal_prefix", "postal_code_start", "postal_code_end", "neighborhood", "priority"]) assert.match(api, new RegExp(`${field}:`, "i"));
   for (const action of ["Editar", "Ativar", "Desativar", "Excluir"]) assert.match(admin, new RegExp(action));

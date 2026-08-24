@@ -29,6 +29,10 @@ const WALDIR = {
   postalCode: "23036-076", street: "Rua Waldir José de Melo", number: "71",
   neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
 };
+const NORMAL_155 = {
+  postalCode: "23036-155", street: "Rua Projetada Um", number: "120",
+  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+};
 const STORE = { latitude: -22.943800658459434, longitude: -43.582438704219854 };
 const SETTINGS = { maximum_delivery_distance_km: 3.5, below_one_km_behavior: "fixed", below_one_km_fee: 3 };
 const RANGES = [{ min_distance_km: 1, max_distance_km: 3.5, fee: 5, active: true }];
@@ -91,7 +95,7 @@ function installFetchMock({ address = CABUCU, viaCepAddress = address, candidate
     if (url.hostname === "viacep.com.br") return response(viaCep(viaCepAddress));
     if (url.hostname === "nominatim.openstreetmap.org") {
       if (nominatimError) throw nominatimError;
-      return response(typeof candidates === "function" ? candidates() : candidates);
+      return response(typeof candidates === "function" ? candidates(url) : candidates);
     }
     throw new Error(`Fallback inesperado: ${url.hostname}`);
   };
@@ -164,16 +168,57 @@ test("endereço residencial preciso entre 1 e 3,5 km usa a faixa existente", asy
   assert.equal(assessment.fee, 5);
 });
 
-test("resultado somente de rua não vira coordenada financeira e não aciona AwesomeAPI", async () => {
+test("endereço sem house_number usa fallback da rua e não aciona AwesomeAPI", async () => {
   const calls = installFetchMock({ candidates: [nominatimCandidate({ houseNumber: null })] });
   const { geocodeDeliveryAddress } = await loadAddressModule("road-only");
-  await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
-  assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 1);
+  const location = await geocodeDeliveryAddress(CABUCU);
+  assert.equal(location.source, "nominatim_street");
+  assert.equal(location.precision, "street");
+  assert.equal(isTrustedDeliveryLocation(location), true);
+  assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 2);
   assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
 });
 
-test("número residencial diferente continua sendo rejeitado", async () => {
-  installFetchMock({ candidates: [nominatimCandidate({ houseNumber: "999" })] });
+test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", async () => {
+  const latitude = STORE.latitude + (2 / 111.195);
+  const calls = installFetchMock({
+    address: NORMAL_155,
+    candidates: (url) => url.searchParams.get("q").includes(", 120,")
+      ? []
+      : [nominatimCandidate({ address: NORMAL_155, houseNumber: null, latitude, longitude: STORE.longitude })],
+  });
+  const { geocodeDeliveryAddress } = await loadAddressModule("normal-23036-155");
+  const location = await geocodeDeliveryAddress(NORMAL_155);
+  const { centerKm, assessment } = assessLocation(location);
+
+  assert.equal(location.source, "nominatim_street");
+  assert.ok(centerKm > 1.99 && centerKm < 2.01);
+  assert.equal(assessment.allowed, true);
+  assert.equal(assessment.fee, 5);
+  const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
+  assert.equal(nominatimCalls.length, 2);
+  assert.doesNotMatch(new URL(nominatimCalls[1]).searchParams.get("q"), /, 120,/);
+});
+
+test("CEP normal com fallback de rua acima de 3,5 km continua recusado", async () => {
+  const latitude = STORE.latitude + (4 / 111.195);
+  installFetchMock({
+    address: NORMAL_155,
+    candidates: (url) => url.searchParams.get("q").includes(", 120,")
+      ? []
+      : [nominatimCandidate({ address: NORMAL_155, houseNumber: null, latitude, longitude: STORE.longitude })],
+  });
+  const { geocodeDeliveryAddress } = await loadAddressModule("normal-outside");
+  const location = await geocodeDeliveryAddress(NORMAL_155);
+  const { assessment } = assessLocation(location);
+  assert.equal(assessment.allowed, false);
+  assert.equal(assessment.code, "OUTSIDE_AREA");
+});
+
+test("número residencial diferente sem resultado de rua continua sendo rejeitado", async () => {
+  installFetchMock({ candidates: (url) => url.searchParams.get("q").includes(", 388,")
+    ? [nominatimCandidate({ houseNumber: "999" })]
+    : [] });
   const { geocodeDeliveryAddress } = await loadAddressModule("wrong-number");
   await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
 });
@@ -236,12 +281,12 @@ test("quatro CEPs de regressão não aceitam os resultados aproximados observado
       (error) => error.code === "ADDRESS_NOT_PRECISE",
       address.postalCode,
     );
-    assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 1);
+    assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 2);
     assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
   }
 });
 
-test("provedor automático delega somente à resolução exata do Nominatim", async () => {
+test("provedor automático prioriza a resolução exata do Nominatim", async () => {
   const calls = installFetchMock({ candidates: [nominatimCandidate()] });
   const location = await locateDeliveryAddress(CABUCU);
   assert.equal(location.source, "nominatim_exact");
@@ -251,12 +296,14 @@ test("provedor automático delega somente à resolução exata do Nominatim", as
   );
 });
 
-test("checkout consulta regra somente por CEP após ADDRESS_NOT_PRECISE, sem GPS ou mapa", async () => {
+test("checkout valida ViaCEP, consulta exceção exact e somente depois chama o geocoder", async () => {
   const app = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
   const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
-  assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
+  assert.match(validation, /validateDeliveryPostalAddress\(checkout/);
   assert.match(validation, /resolveDeliveryArea\(checkout\.postalCode, \{ signal:/);
   assert.match(validation, /createPostalZoneLocation\(zone, checkout\.postalCode\)/);
+  assert.ok(validation.indexOf("resolveDeliveryArea") < validation.indexOf("locateDeliveryAddress"));
+  assert.match(validation, /if \(administrativeLocation\)[\s\S]*return;/);
   assert.match(validation, /type: "unavailable"/);
   assert.match(validation, /Este endereço ainda não está disponível para entrega\./);
   assert.doesNotMatch(validation, /requestDeviceGps|device_gps/);

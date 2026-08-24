@@ -107,8 +107,8 @@ stable
 security definer
 set search_path = public, pg_temp
 as $$
-  -- p_neighborhood é reservado para uso futuro, após validação server-side CEP ↔ bairro.
-  -- Nesta versão ele nunca participa de uma decisão financeira.
+  -- Somente CEP exato funciona como exceção financeira nesta versão.
+  -- Prefixo, faixa e bairro permanecem estruturados apenas para uso futuro.
   with request as (
     select regexp_replace(coalesce(p_postal_code, ''), '[^0-9]', '', 'g') as postal_code
   )
@@ -117,28 +117,9 @@ as $$
   cross join request
   where zone.active
     and length(request.postal_code) = 8
-    and (
-      (zone.match_type = 'exact' and zone.postal_code = request.postal_code)
-      or (
-        zone.match_type = 'prefix'
-        and left(request.postal_code, length(zone.postal_prefix)) = zone.postal_prefix
-      )
-      or (
-        zone.match_type = 'range'
-        and request.postal_code between zone.postal_code_start and zone.postal_code_end
-      )
-    )
+    and zone.match_type = 'exact'
+    and zone.postal_code = request.postal_code
   order by
-    case zone.match_type
-      when 'exact' then 1
-      when 'prefix' then 2
-      when 'range' then 3
-    end,
-    case zone.match_type
-      when 'exact' then 8
-      when 'prefix' then length(zone.postal_prefix)
-      when 'range' then -((zone.postal_code_end::bigint) - (zone.postal_code_start::bigint))
-    end desc,
     zone.priority desc,
     zone.created_at asc,
     zone.id asc
@@ -165,6 +146,36 @@ revoke all on function public.resolve_delivery_area(text, text) from public;
 grant execute on function public.resolve_delivery_area(text, text) to anon, authenticated;
 revoke all on function public.get_delivery_postal_zone(text) from public;
 grant execute on function public.get_delivery_postal_zone(text) to anon, authenticated;
+
+alter table public.orders drop constraint if exists orders_location_source_allowed;
+alter table public.orders
+  add constraint orders_location_source_allowed
+  check (
+    location_source is null
+    or location_source in ('nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone')
+  );
+
+alter table public.orders drop constraint if exists orders_location_accuracy_valid;
+alter table public.orders
+  add constraint orders_location_accuracy_valid
+  check (
+    (location_source is null and location_accuracy_m is null)
+    or (location_source in ('nominatim_exact', 'nominatim_street', 'google_exact', 'map_pin', 'address_consensus', 'postal_zone') and location_accuracy_m is null)
+    or (
+      location_source = 'device_gps'
+      and location_accuracy_m > 0
+      and location_accuracy_m <= 150
+    )
+  );
+
+alter table public.orders drop constraint if exists orders_location_uncertainty_valid;
+alter table public.orders
+  add constraint orders_location_uncertainty_valid
+  check (
+    (location_source is null and location_uncertainty_m is null)
+    or (location_source in ('nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'postal_zone') and location_uncertainty_m is null)
+    or (location_source = 'address_consensus' and location_uncertainty_m >= 750)
+  );
 
 create or replace function public.place_order_v2(p_order jsonb)
 returns jsonb
@@ -234,7 +245,7 @@ begin
   if v_delivery_type = 'entrega' then
     if length(trim(coalesce(p_order->>'address', ''))) < 5 then raise exception 'INVALID_ADDRESS'; end if;
     if v_location_source is null
-       or v_location_source not in ('nominatim_exact', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone') then
+       or v_location_source not in ('nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone') then
       raise exception 'INVALID_LOCATION_SOURCE';
     end if;
 
