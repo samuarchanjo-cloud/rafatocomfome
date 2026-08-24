@@ -57,6 +57,14 @@ export function evaluateDelivery(distance, ranges, settings, precision = "exact"
   return { allowed: true, fee: Number(range.fee) || 0, code: "RANGE", range, message: "Entrega disponível para o endereço informado." };
 }
 
+export function evaluateOrderDelivery(deliveryType, location, ranges, settings) {
+  if (deliveryType === "retirada") {
+    return { allowed: true, fee: 0, code: "PICKUP", message: "Retirada no local." };
+  }
+
+  return evaluateDelivery(location?.km, ranges, settings, location?.precision || "exact");
+}
+
 export function validateDeliveryRanges(ranges) {
   const active = ranges
     .filter((item) => item.active !== false)

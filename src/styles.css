@@ -695,6 +695,75 @@ textarea {
   color: #ffaaa2;
 }
 
+.gps-fallback-panel {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid rgba(255, 193, 7, 0.52);
+  border-radius: 8px;
+  background: rgba(52, 35, 7, 0.72);
+}
+
+.gps-fallback-panel strong,
+.gps-fallback-panel p,
+.gps-fallback-panel small {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.gps-fallback-panel p,
+.gps-fallback-panel small {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.gps-confirmation {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 9px;
+  color: var(--white);
+}
+
+.gps-confirmation input {
+  width: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 18px;
+}
+
+.gps-use-button,
+.gps-review-button {
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.gps-use-button {
+  border: 1px solid rgba(255, 193, 7, 0.56);
+  background: #2a1805;
+  color: var(--yellow-light);
+}
+
+.gps-use-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.gps-review-button {
+  border: 1px solid var(--line);
+  background: #111;
+  color: var(--white);
+}
+
 .segmented {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { FALLBACK_BUSINESS_HOURS, FALLBACK_CATEGORIES, PUBLIC_FALLBACKS } from "../menuData";
+import { callPlaceOrderRpc } from "./orderRpc";
 
 const PRODUCTS_BUCKET = "product-images";
 
@@ -240,7 +241,5 @@ export async function removeProductImage(publicUrl) {
 }
 
 export async function placeOrder(payload) {
-  const { data, error } = await supabase.rpc("place_order", { p_order: payload });
-  if (error) throw error;
-  return data;
+  return callPlaceOrderRpc(supabase, payload);
 }
