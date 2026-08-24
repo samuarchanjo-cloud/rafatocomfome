@@ -21,7 +21,6 @@ import {
 } from "lucide-react";
 import {
   deleteCategory,
-  deleteDeliveryRange,
   deleteDeliveryPostalZone,
   deleteProduct,
   loadDeliveryPostalZones,
@@ -37,7 +36,6 @@ import {
 } from "../lib/api";
 import { formatPostalCode, postalCodeDigits } from "../lib/address";
 import { DAY_NAMES } from "../lib/businessHours";
-import { validateDeliveryRanges } from "../lib/delivery";
 
 const TABS = [
   ["overview", "Visão geral", LayoutDashboard],
@@ -426,24 +424,62 @@ function HoursManager({ hours, reloadStore, showNotice }) {
 
 function DeliveryManager({ ranges, settings, reloadStore, showNotice }) {
   const [settingsDraft, setSettingsDraft] = useState(settings);
-  const [rangeDraft, setRangeDraft] = useState(null);
-  const [isNew, setIsNew] = useState(false);
+  const activeRanges = useMemo(
+    () => ranges.filter((range) => range.active !== false).sort((first, second) => Number(first.min_distance_km) - Number(second.min_distance_km)),
+    [ranges],
+  );
+  const normalRange = activeRanges[0] || null;
+  const [normalFee, setNormalFee] = useState(normalRange?.fee ?? "");
   const [saving, setSaving] = useState(false);
-  useEffect(() => setSettingsDraft(settings), [settings]);
+  useEffect(() => {
+    setSettingsDraft(settings);
+    setNormalFee(normalRange?.fee ?? "");
+  }, [settings, normalRange?.id, normalRange?.fee]);
   async function saveRules(event) {
     event.preventDefault();
-    if (!settingsDraft.maximum_delivery_distance_km || Number(settingsDraft.maximum_delivery_distance_km) <= 0) { showNotice("Defina uma distância máxima maior que zero.", "error"); return; }
-    if (settingsDraft.below_one_km_behavior === "fixed" && (settingsDraft.below_one_km_fee === "" || Number(settingsDraft.below_one_km_fee) < 0)) { showNotice("Defina a taxa fixa abaixo de 1 km.", "error"); return; }
-    setSaving(true); try { await saveSettings(settingsDraft); await reloadStore(); showNotice("Regras de entrega salvas.", "success"); } catch(error){showNotice(errorMessage(error),"error");} finally{setSaving(false);}
+    const maximum = Number(settingsDraft.maximum_delivery_distance_km);
+    const shortFee = Number(settingsDraft.below_one_km_fee);
+    const regularFee = Number(normalFee);
+    if (!Number.isFinite(maximum) || maximum <= 1) { showNotice("Defina um limite máximo maior que 1 km.", "error"); return; }
+    if (!Number.isFinite(shortFee) || shortFee < 0) { showNotice("Defina a taxa até 1 km.", "error"); return; }
+    if (!Number.isFinite(regularFee) || regularFee < 0) { showNotice("Defina a taxa acima de 1 km.", "error"); return; }
+    if (activeRanges.length > 1) { showNotice("Existe mais de uma faixa ativa. Mantenha uma única faixa para a regra comercial atual.", "error"); return; }
+    setSaving(true);
+    try {
+      await saveSettings({
+        ...settingsDraft,
+        below_one_km_behavior: "fixed",
+        below_one_km_fee: shortFee,
+        maximum_delivery_distance_km: maximum,
+      });
+      await saveDeliveryRange({
+        ...(normalRange || {}),
+        min_distance_km: 1,
+        max_distance_km: maximum,
+        fee: regularFee,
+        active: true,
+      }, !normalRange);
+      await reloadStore();
+      showNotice("Taxas e limite de entrega salvos.", "success");
+    } catch (error) {
+      showNotice(errorMessage(error), "error");
+    } finally {
+      setSaving(false);
+    }
   }
-  function startRange(range=null){setIsNew(!range);setRangeDraft(range?{...range}:{min_distance_km:ranges.length?"":"1.00",max_distance_km:ranges.length?"":"1.99",fee:"",active:true});}
-  async function submitRange(event){event.preventDefault();const candidate=isNew?[...ranges,rangeDraft]:ranges.map((item)=>item.id===rangeDraft.id?rangeDraft:item);const validation=validateDeliveryRanges(candidate);if(validation){showNotice(validation,"error");return;}setSaving(true);try{await saveDeliveryRange(rangeDraft,isNew);await reloadStore();setRangeDraft(null);showNotice("Faixa de entrega salva.","success");}catch(error){showNotice(errorMessage(error),"error");}finally{setSaving(false);}}
-  async function remove(range){if(!window.confirm("Excluir esta faixa de entrega?"))return;try{await deleteDeliveryRange(range.id);await reloadStore();showNotice("Faixa excluída.","success");}catch(error){showNotice(errorMessage(error),"error");}}
-  return <div className="admin-section"><div className="admin-section-title"><h2>Taxas de entrega</h2><span>Valores por distância</span></div>
-    <form className="admin-editor" onSubmit={saveRules}><h3>Área e regra abaixo de 1 km</h3><div className="field-row"><label>Comportamento abaixo de 1 km<select value={settingsDraft.below_one_km_behavior} onChange={(event)=>setSettingsDraft({...settingsDraft,below_one_km_behavior:event.target.value})}><option value="blocked">Bloquear</option><option value="free">Grátis</option><option value="fixed">Taxa fixa</option></select></label>{settingsDraft.below_one_km_behavior==="fixed"&&<label>Taxa fixa (R$)<input type="number" min="0" step="0.01" value={settingsDraft.below_one_km_fee??""} onChange={(event)=>setSettingsDraft({...settingsDraft,below_one_km_fee:event.target.value})}/></label>}</div><label>Distância máxima de atendimento (km)<input type="number" min="0.01" step="0.01" value={settingsDraft.maximum_delivery_distance_km??""} onChange={(event)=>setSettingsDraft({...settingsDraft,maximum_delivery_distance_km:event.target.value})}/></label><button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving?"Salvando...":"Salvar regras"}</button></form>
-    <div className="admin-section-title compact"><h3>Faixas a partir de 1 km</h3><button className="admin-primary" type="button" onClick={()=>startRange()}><Plus size={17}/>Nova faixa</button></div>
-    {rangeDraft&&<form className="admin-editor" onSubmit={submitRange}><div className="editor-heading"><h3>{isNew?"Nova faixa":"Editar faixa"}</h3><button type="button" onClick={()=>setRangeDraft(null)}><X size={19}/></button></div><div className="field-row three"><label>Distância mínima (km)<input type="number" min="1" step="0.01" required value={rangeDraft.min_distance_km} onChange={(event)=>setRangeDraft({...rangeDraft,min_distance_km:event.target.value})}/></label><label>Distância máxima (km)<input type="number" min="1" step="0.01" required value={rangeDraft.max_distance_km} onChange={(event)=>setRangeDraft({...rangeDraft,max_distance_km:event.target.value})}/></label><label>Taxa (R$)<input type="number" min="0" step="0.01" required value={rangeDraft.fee} onChange={(event)=>setRangeDraft({...rangeDraft,fee:event.target.value})}/></label></div><label className="admin-check"><input type="checkbox" checked={rangeDraft.active!==false} onChange={(event)=>setRangeDraft({...rangeDraft,active:event.target.checked})}/>Faixa ativa</label><button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving?"Salvando...":"Salvar faixa"}</button></form>}
-    <div className="admin-card-list">{ranges.map((range)=><article className="fee-row" key={range.id}><div><strong>{Number(range.min_distance_km).toFixed(2)} a {Number(range.max_distance_km).toFixed(2)} km</strong><span>{money(range.fee)} · {range.active?"Ativa":"Inativa"}</span></div><div className="row-actions"><button type="button" onClick={()=>startRange(range)}>Editar</button><button className="danger" type="button" onClick={()=>remove(range)}><Trash2 size={16}/></button></div></article>)}</div>{ranges.length===0&&<p className="empty">Nenhuma faixa cadastrada. Entregas a partir de 1 km permanecerão bloqueadas.</p>}
+  return <div className="admin-section"><div className="admin-section-title"><h2>Taxas de entrega</h2><span>Configuração por distância real de rota</span></div>
+    <form className="admin-editor" onSubmit={saveRules}>
+      <h3>Entrega própria</h3>
+      <p className="empty">A distância é calculada pelas ruas. Acima do limite, o checkout oferece Uber Entrega com frete pago separadamente pelo cliente.</p>
+      <div className="field-row three">
+        <label>Taxa até 1 km (R$)<input type="number" min="0" step="0.01" required value={settingsDraft.below_one_km_fee ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, below_one_km_fee: event.target.value })} /></label>
+        <label>Taxa acima de 1 km (R$)<input type="number" min="0" step="0.01" required value={normalFee} onChange={(event) => setNormalFee(event.target.value)} /></label>
+        <label>Limite da entrega própria (km)<input type="number" min="1.01" step="0.01" required value={settingsDraft.maximum_delivery_distance_km ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, maximum_delivery_distance_km: event.target.value })} /></label>
+      </div>
+      <div className="admin-card"><strong>Regra atual</strong><p>Até 1 km: {money(settingsDraft.below_one_km_fee)}</p><p>Acima de 1 km até {Number(settingsDraft.maximum_delivery_distance_km || 0).toFixed(2)} km: {money(normalFee)}</p></div>
+      {activeRanges.length > 1 && <p className="admin-warning">Há mais de uma faixa ativa no banco. Consolide-as antes de salvar esta regra simplificada.</p>}
+      <button className="admin-primary wide" disabled={saving}><Save size={17}/>{saving ? "Salvando..." : "Salvar taxas e limite"}</button>
+    </form>
   </div>;
 }
 

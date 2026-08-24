@@ -1,6 +1,6 @@
 import { supabase } from "./supabase";
 import { FALLBACK_BUSINESS_HOURS, FALLBACK_CATEGORIES, PUBLIC_FALLBACKS } from "../menuData";
-import { callPlaceOrderRpc } from "./orderRpc";
+import { placeRoutedOrder, quoteDeliveryRoute as quoteRoutedDelivery } from "./routing";
 
 const PRODUCTS_BUCKET = "product-images";
 
@@ -301,5 +301,9 @@ export async function removeProductImage(publicUrl) {
 }
 
 export async function placeOrder(payload) {
-  return callPlaceOrderRpc(supabase, payload);
+  return placeRoutedOrder(payload, supabase);
+}
+
+export async function quoteDeliveryRoute(location) {
+  return quoteRoutedDelivery(location, supabase);
 }

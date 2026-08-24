@@ -29,12 +29,13 @@ import {
   validateDeliveryAddressFields,
 } from "./lib/address";
 import { getBusinessStatus } from "./lib/businessHours";
-import { distanceInKm, effectiveDeliveryDistance, evaluateOrderDelivery } from "./lib/delivery";
+import { evaluateOrderDelivery } from "./lib/delivery";
 import { locateDeliveryAddress } from "./lib/geocodingProvider";
 import { isTrustedDeliveryLocation } from "./lib/location";
 import { createPostalZoneLocation } from "./lib/postalZone";
 import {
   checkIsAdmin,
+  quoteDeliveryRoute,
   resolveDeliveryArea,
   getSession,
   loadStoreData,
@@ -100,6 +101,8 @@ function friendlyOrderError(error) {
   if (message.includes("MAP_PIN_CONFIRMATION_REQUIRED")) return "Confirme o local de entrega no mapa antes de finalizar.";
   if (message.includes("ADDRESS_REQUIRES_CONFIRMATION")) return "Não conseguimos confirmar com segurança se este endereço está dentro da área de entrega.";
   if (message.includes("OUTSIDE_DELIVERY_AREA")) return "Este endereço está fora da nossa área de entrega.";
+  if (message.includes("UBER_NOT_AVAILABLE")) return "Uber Entrega só fica disponível acima do limite da entrega própria.";
+  if (message.includes("INVALID_ROUTE_DISTANCE") || message.includes("INVALID_ROUTE_DURATION")) return "Não foi possível validar a rota de entrega. Calcule novamente.";
   if (message.includes("BELOW_ONE_KM_BLOCKED")) return "Pedidos abaixo de 1 km estão bloqueados para entrega.";
   if (message.includes("DELIVERY_NOT_CONFIGURED") || message.includes("NO_DELIVERY_RANGE")) return "Não há uma taxa configurada para esta distância.";
   if (message.includes("PRODUCT_UNAVAILABLE")) return "Um produto do carrinho ficou indisponível. Revise o pedido.";
@@ -132,6 +135,7 @@ function App() {
     state: "",
     reference: "",
     deliveryType: "entrega",
+    deliveryMode: "own_delivery",
     payment: "pix",
     needsChange: false,
     changeFor: "",
@@ -266,6 +270,10 @@ function App() {
     store.deliveryRanges,
     store.settings,
   );
+  const uberSelected = checkout.deliveryType === "entrega"
+    && checkout.deliveryMode === "uber"
+    && deliveryAssessment.uberAvailable;
+  const deliveryAllowed = deliveryAssessment.allowed || uberSelected;
   const deliveryFee = deliveryAssessment.allowed ? deliveryAssessment.fee : 0;
   const isCardPayment = ["credito", "debito"].includes(checkout.payment);
   const cardFee = isCardPayment ? (subtotal + deliveryFee) * (Number(store.settings.card_fee_percent) || 0) / 100 : 0;
@@ -311,40 +319,32 @@ function App() {
     }
     setCheckout((current) => {
       const next = { ...current, [field]: value };
+      if (DELIVERY_ADDRESS_FIELDS.has(field) || field === "deliveryType") next.deliveryMode = "own_delivery";
       if (field === "payment" && value !== "dinheiro") Object.assign(next, { needsChange: false, changeFor: "" });
       if (field === "needsChange" && !value) next.changeFor = "";
       return next;
     });
   }
 
-  function resolveDeliveryCoordinates(coordinates) {
-    const storeCoordinates = {
-      latitude: Number(store.settings.store_latitude),
-      longitude: Number(store.settings.store_longitude),
+  async function resolveDeliveryCoordinates(coordinates) {
+    const route = await quoteDeliveryRoute(coordinates);
+    const location = {
+      ...coordinates,
+      km: Number(route.distanceKm),
+      routeSource: route.routeSource,
+      routeDurationMinutes: route.durationMinutes,
     };
-    if (
-      !Number.isFinite(storeCoordinates.latitude) ||
-      !Number.isFinite(storeCoordinates.longitude) ||
-      storeCoordinates.latitude < -90 ||
-      storeCoordinates.latitude > 90 ||
-      storeCoordinates.longitude < -180 ||
-      storeCoordinates.longitude > 180
-    ) {
-      throw new Error("A localização do estabelecimento não está configurada corretamente.");
-    }
-    const centerKm = distanceInKm(storeCoordinates, coordinates);
-    const km = effectiveDeliveryDistance(centerKm, coordinates);
-    const location = { ...coordinates, centerKm, km };
     const assessment = evaluateOrderDelivery("entrega", location, store.deliveryRanges, store.settings);
     return { location, assessment };
   }
 
-  function acceptResolvedLocation(coordinates) {
-    const { location, assessment } = resolveDeliveryCoordinates(coordinates);
+  async function acceptResolvedLocation(coordinates) {
+    const { location, assessment } = await resolveDeliveryCoordinates(coordinates);
     setDeliveryLocation(location);
+    setCheckout((current) => ({ ...current, deliveryMode: "own_delivery" }));
     setAddressValidationStatus({
       type: assessment.allowed ? "success" : "outside",
-      message: assessment.allowed ? "Local de entrega confirmado." : assessment.message,
+      message: assessment.allowed ? "Local de entrega confirmado." : "Este endereço fica fora da nossa área de entrega própria.",
     });
   }
 
@@ -380,7 +380,8 @@ function App() {
         setAddressValidationStatus({ type: "error", message: "O endereço não pôde ser localizado com precisão." });
         return;
       }
-      acceptResolvedLocation(coordinates);
+      setAddressValidationStatus({ type: "loading", message: "Calculando a rota de entrega..." });
+      await acceptResolvedLocation(coordinates);
     } catch (error) {
       if (error.name === "AbortError") return;
       if (error.code === "ADDRESS_NOT_PRECISE") {
@@ -428,13 +429,22 @@ function App() {
     const paymentLines = checkout.payment === "dinheiro"
       ? ["Pagamento: Dinheiro", checkout.needsChange ? `Troco para: ${moneyFromInput(checkout.changeFor)}` : ""]
       : [`💳 ${paymentLabels[checkout.payment]}`];
+    const uberLines = order.delivery_mode === "uber"
+      ? [
+          "🚗 ENTREGA POR UBER",
+          `Endereço: ${composeDeliveryAddress(checkout)}`,
+          order.distance_km != null ? `Distância estimada da rota: ${Number(order.distance_km).toFixed(2)} km` : "",
+          "Frete do Uber por conta do cliente.",
+        ]
+      : [];
     return [
       "🍔 NOVO PEDIDO",
       `Código: ${String(order.id).slice(0, 8)}`,
       `👤 ${checkout.name}`,
       `📞 ${checkout.phone}`,
-      `📍 ${checkout.deliveryType === "retirada" ? "Retirada no local" : composeDeliveryAddress(checkout)}`,
-      checkout.deliveryType === "entrega" && order.distance_km != null ? `Distância: ${Number(order.distance_km).toFixed(2)} km` : "",
+      order.delivery_mode !== "uber" ? `📍 ${checkout.deliveryType === "retirada" ? "Retirada no local" : composeDeliveryAddress(checkout)}` : "",
+      order.delivery_mode !== "uber" && checkout.deliveryType === "entrega" && order.distance_km != null ? `Distância da rota: ${Number(order.distance_km).toFixed(2)} km` : "",
+      ...uberLines,
       "🛒 Itens",
       itemLines,
       `Subtotal: ${money(order.subtotal)}`,
@@ -460,7 +470,7 @@ function App() {
     if (checkout.deliveryType === "entrega" && !isTrustedDeliveryLocation(deliveryLocation)) {
       return showNotice("Confirme o local de entrega antes de finalizar.", "error");
     }
-    if (checkout.deliveryType === "entrega" && !deliveryAssessment.allowed) return showNotice(deliveryAssessment.message, "error");
+    if (checkout.deliveryType === "entrega" && !deliveryAllowed) return showNotice(deliveryAssessment.message, "error");
     if (checkout.payment === "dinheiro" && checkout.needsChange && !checkout.changeFor.trim()) return showNotice("Informe para quanto precisa de troco.", "error");
 
     setSubmittingOrder(true);
@@ -471,6 +481,7 @@ function App() {
         address: checkout.deliveryType === "entrega" ? composeDeliveryAddress(checkout) : null,
         reference: checkout.reference || null,
         delivery_type: checkout.deliveryType,
+        delivery_mode: checkout.deliveryType === "entrega" ? checkout.deliveryMode : null,
         payment_method: checkout.payment,
         needs_change: checkout.needsChange,
         change_for: checkout.changeFor || null,
@@ -523,7 +534,7 @@ function App() {
 
         {!search.trim() && view === "cart" && <CartView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} status={status} onQty={updateQty} onRemove={(id) => setCart((current) => current.filter((item) => item.id !== id))} onCheckout={() => status.open ? setView("checkout") : showNotice(`Estamos fechados. Próxima abertura: ${status.nextLabel}.`, "error")} onBack={() => setView("home")} />}
 
-        {!search.trim() && view === "checkout" && <CheckoutView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} setCheckoutField={setCheckoutField} finishOrder={finishOrder} deliveryLocation={deliveryLocation} deliveryAssessment={deliveryAssessment} postalCodeStatus={postalCodeStatus} addressValidationStatus={addressValidationStatus} validateDeliveryAddress={validateDeliveryAddress} validatingAddress={validatingAddress} reviewDeliveryAddress={reviewDeliveryAddress} changeDeliveryLocation={changeDeliveryLocation} pixCopyStatus={pixCopyStatus} copyPixKey={copyPixKey} status={status} settings={store.settings} submitting={submittingOrder} onBack={() => setView("cart")} />}
+        {!search.trim() && view === "checkout" && <CheckoutView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} setCheckoutField={setCheckoutField} finishOrder={finishOrder} deliveryLocation={deliveryLocation} deliveryAssessment={deliveryAssessment} deliveryAllowed={deliveryAllowed} postalCodeStatus={postalCodeStatus} addressValidationStatus={addressValidationStatus} validateDeliveryAddress={validateDeliveryAddress} validatingAddress={validatingAddress} reviewDeliveryAddress={reviewDeliveryAddress} changeDeliveryLocation={changeDeliveryLocation} pixCopyStatus={pixCopyStatus} copyPixKey={copyPixKey} status={status} settings={store.settings} submitting={submittingOrder} onBack={() => setView("cart")} />}
 
         {!search.trim() && view === "admin" && (authLoading
           ? <p className="empty">Verificando sessão...</p>
@@ -556,9 +567,9 @@ function CartView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment, to
   return <section className="cart-view"><button className="back-button" onClick={onBack}><ArrowLeft size={18} />Continuar escolhendo</button><div className="section-title"><h1>Carrinho</h1><span>Confira os itens antes de finalizar</span></div>{cartLines.length ? <><div className="cart-list">{cartLines.map((item) => <article className="cart-item" key={item.id}><img src={item.product.image} alt={item.product.name} /><div><strong>{item.product.name}</strong><span>{money(item.product.price)} cada</span><div className="qty-row"><button onClick={() => onQty(item.id, -1)} aria-label="Diminuir"><Minus size={16} /></button><b>{item.qty}</b><button onClick={() => onQty(item.id, 1)} aria-label="Aumentar"><Plus size={16} /></button><button className="ghost-danger" onClick={() => onRemove(item.id)} aria-label="Remover"><Trash2 size={16} /></button></div></div><strong>{money(item.lineTotal)}</strong></article>)}</div><Totals subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} deliveryType={checkout.deliveryType} /><button className="primary-action" disabled={!status.open} onClick={onCheckout}>{status.open ? "Finalizar pedido" : "Fechado para pedidos"}</button>{!status.open && <p className="action-help">Próxima abertura: {status.nextLabel}.</p>}</> : <p className="empty">Seu carrinho está vazio.</p>}</section>;
 }
 
-function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment, total, checkout, setCheckoutField, finishOrder, deliveryLocation, deliveryAssessment, postalCodeStatus, addressValidationStatus, validateDeliveryAddress, validatingAddress, reviewDeliveryAddress, changeDeliveryLocation, pixCopyStatus, copyPixKey, status, settings, submitting, onBack }) {
+function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment, total, checkout, setCheckoutField, finishOrder, deliveryLocation, deliveryAssessment, deliveryAllowed, postalCodeStatus, addressValidationStatus, validateDeliveryAddress, validatingAddress, reviewDeliveryAddress, changeDeliveryLocation, pixCopyStatus, copyPixKey, status, settings, submitting, onBack }) {
   const needsAddress = checkout.deliveryType === "entrega";
-  const blocked = !status.open || submitting || (needsAddress && !deliveryAssessment.allowed);
+  const blocked = !status.open || submitting || (needsAddress && !deliveryAllowed);
   const deliveryErrorMessage = ["error", "outside"].includes(addressValidationStatus.type)
     ? addressValidationStatus.message
     : deliveryAssessment.message;
@@ -577,22 +588,23 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
       </div>
       <div className="location-tools"><button type="button" onClick={validateDeliveryAddress} disabled={validatingAddress || postalCodeStatus.type === "loading"}><MapPin size={17} />{validatingAddress ? "Localizando endereço..." : "Localizar endereço e calcular entrega"}</button></div>
       {addressValidationStatus.type === "unavailable" && <div className="gps-fallback-panel"><strong>{addressValidationStatus.message}</strong><button type="button" className="gps-review-button" onClick={reviewDeliveryAddress}>Revisar endereço</button></div>}
-      {deliveryLocation && <LocationStatusCard location={deliveryLocation} assessment={deliveryAssessment} onChange={changeDeliveryLocation} />}
+      {deliveryLocation && <LocationStatusCard location={deliveryLocation} assessment={deliveryAssessment} deliveryMode={checkout.deliveryMode} onSelectUber={() => setCheckoutField("deliveryMode", "uber")} onChange={changeDeliveryLocation} />}
     </>}
     <div className="option-group"><span>Forma de pagamento</span><div className="payment-list"><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "pix"} label="Pix" onClick={() => setCheckoutField("payment", "pix")} /><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "dinheiro"} label="Dinheiro" onClick={() => setCheckoutField("payment", "dinheiro")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "credito"} label="Cartão de crédito" onClick={() => setCheckoutField("payment", "credito")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "debito"} label="Cartão de débito" onClick={() => setCheckoutField("payment", "debito")} /></div></div>
     {checkout.payment === "dinheiro" && <div className="option-group change-option"><span>Precisa de troco?</span><div className="segmented"><button type="button" className={!checkout.needsChange ? "selected" : ""} onClick={() => setCheckoutField("needsChange", false)}>Não</button><button type="button" className={checkout.needsChange ? "selected" : ""} onClick={() => setCheckoutField("needsChange", true)}>Sim</button></div>{checkout.needsChange && <label>Troco para quanto?<input inputMode="decimal" placeholder="R$ 100,00" value={checkout.changeFor} onBlur={() => setCheckoutField("changeFor", moneyFromInput(checkout.changeFor))} onChange={(event) => setCheckoutField("changeFor", event.target.value)} /></label>}</div>}
     {checkout.payment === "pix" && <PixPaymentCard settings={settings} copyStatus={pixCopyStatus} onCopy={copyPixKey} />}
-    <label>Observação do pedido<textarea value={checkout.notes} onChange={(event) => setCheckoutField("notes", event.target.value)} /></label><div className="mini-order"><strong>{cartLines.length} item(ns) no pedido</strong><Totals subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} deliveryType={checkout.deliveryType} deliveryDistance={deliveryLocation} /></div>
+    <label>Observação do pedido<textarea value={checkout.notes} onChange={(event) => setCheckoutField("notes", event.target.value)} /></label><div className="mini-order"><strong>{cartLines.length} item(ns) no pedido</strong><Totals subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} deliveryType={checkout.deliveryType} deliveryMode={checkout.deliveryMode} deliveryDistance={deliveryLocation} /></div>
     {!status.open && <div className="form-error">Estamos fechados. Próxima abertura: {status.nextLabel}.</div>}{showDeliveryError && <div className="form-error">{deliveryErrorMessage}</div>}
     <button className="primary-action" type="submit" disabled={blocked}><MessageCircle size={19} />{submitting ? "Validando e salvando..." : status.open ? "Enviar pedido para WhatsApp" : "Fechado para pedidos"}</button>
   </form></section>;
 }
 
-function LocationStatusCard({ location, assessment, onChange }) {
-  const title = assessment.allowed ? "Entrega disponível" : "Este endereço está fora da nossa área de entrega.";
+function LocationStatusCard({ location, assessment, deliveryMode, onSelectUber, onChange }) {
+  const uberSelected = deliveryMode === "uber" && assessment.uberAvailable;
+  const title = assessment.allowed ? "Entrega disponível" : uberSelected ? "Uber Entrega selecionada" : "Fora da área de entrega própria";
   return <div className={`location-status-card ${assessment.allowed ? "success" : "warning"}`}>
     {assessment.allowed ? <CheckCircle2 size={24} /> : <TriangleAlert size={24} />}
-    <div><strong>{title}</strong>{assessment.allowed && <div className="location-fee"><span>Taxa de entrega</span><b>{money(assessment.fee)}</b></div>}{location.km != null && Number.isFinite(Number(location.km)) && <small>Distância: {Number(location.km).toFixed(2)} km</small>}<button type="button" className="location-change-button" onClick={onChange}>Alterar endereço</button></div>
+    <div><strong>{title}</strong>{assessment.allowed && <div className="location-fee"><span>Taxa de entrega</span><b>{money(assessment.fee)}</b></div>}{assessment.uberAvailable && <><p>A rota até este endereço tem aproximadamente {Number(location.km).toFixed(2)} km.</p>{!uberSelected && <button type="button" className="uber-delivery-button" onClick={onSelectUber}>Solicitar Uber Entrega</button>}<small>Frete do Uber pago separadamente pelo cliente.</small></>}{!assessment.uberAvailable && location.km != null && Number.isFinite(Number(location.km)) && <small>Distância da rota: {Number(location.km).toFixed(2)} km</small>}<button type="button" className="location-change-button" onClick={onChange}>Alterar endereço</button></div>
   </div>;
 }
 
@@ -614,8 +626,9 @@ function PaymentButton({ icon, active, label, onClick }) {
   return <button type="button" className={active ? "payment selected" : "payment"} onClick={onClick}>{icon}{label}</button>;
 }
 
-function Totals({ subtotal, deliveryFee, cardFee = 0, isCardPayment = false, total, deliveryType, deliveryDistance }) {
-  return <div className="totals">{deliveryDistance && deliveryType === "entrega" && deliveryDistance.km != null && Number.isFinite(Number(deliveryDistance.km)) && <div className="distance-line"><span>Distância</span><strong>{Number(deliveryDistance.km).toFixed(2)} km</strong></div>}<div><span>Subtotal</span><strong>{money(subtotal)}</strong></div><div><span>{deliveryType === "retirada" ? "Retirada" : "Taxa de entrega"}</span><strong>{money(deliveryFee)}</strong></div>{isCardPayment && <div><span>Taxa do cartão</span><strong>{money(cardFee)}</strong></div>}<div className="grand-total"><span>Total</span><strong>{money(total)}</strong></div></div>;
+function Totals({ subtotal, deliveryFee, cardFee = 0, isCardPayment = false, total, deliveryType, deliveryMode, deliveryDistance }) {
+  const isUber = deliveryType === "entrega" && deliveryMode === "uber";
+  return <div className="totals">{deliveryDistance && deliveryType === "entrega" && deliveryDistance.km != null && Number.isFinite(Number(deliveryDistance.km)) && <div className="distance-line"><span>Distância da rota</span><strong>{Number(deliveryDistance.km).toFixed(2)} km</strong></div>}<div><span>Subtotal</span><strong>{money(subtotal)}</strong></div>{isUber ? <div><span>Entrega</span><strong>Uber — paga separadamente</strong></div> : <div><span>{deliveryType === "retirada" ? "Retirada" : "Taxa de entrega"}</span><strong>{money(deliveryFee)}</strong></div>}{isCardPayment && <div><span>Taxa do cartão</span><strong>{money(cardFee)}</strong></div>}<div className="grand-total"><span>Total</span><strong>{money(total)}</strong></div></div>;
 }
 
 function AdminLogin({ showNotice }) {

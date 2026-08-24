@@ -970,6 +970,18 @@ textarea {
   color: var(--white);
 }
 
+.uber-delivery-button {
+  min-height: 38px;
+  margin-top: 7px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 193, 7, 0.56);
+  border-radius: 8px;
+  background: #2a1805;
+  color: var(--yellow-light);
+  cursor: pointer;
+  font-weight: 900;
+}
+
 .location-change-button {
   min-height: 34px;
   margin-top: 9px;

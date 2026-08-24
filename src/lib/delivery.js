@@ -52,18 +52,24 @@ export function evaluateDelivery(distance, ranges, settings, precision = "exact"
         message: "Não conseguimos confirmar com segurança se este endereço está dentro da área de entrega.",
       };
     }
-    return { allowed: false, fee: 0, code: "OUTSIDE_AREA", message: "Este endereço está fora da nossa área de entrega." };
+    return {
+      allowed: false,
+      fee: 0,
+      code: "UBER_AVAILABLE",
+      uberAvailable: true,
+      message: "Este endereço fica fora da nossa área de entrega própria.",
+    };
   }
 
-  if (roundedDistance < 1) {
+  if (roundedDistance <= 1) {
     const behavior = settings.below_one_km_behavior;
-    if (behavior === "free") return { allowed: true, fee: 0, code: "FREE", message: "Entrega grátis abaixo de 1 km." };
+    if (behavior === "free") return { allowed: true, fee: 0, code: "FREE", message: "Entrega grátis até 1 km." };
     if (behavior === "fixed") {
       const fee = Number(settings.below_one_km_fee);
-      if (Number.isFinite(fee) && fee >= 0) return { allowed: true, fee, code: "FIXED", message: "Taxa fixa abaixo de 1 km." };
-      return { allowed: false, fee: 0, code: "DELIVERY_NOT_CONFIGURED", message: "A taxa abaixo de 1 km ainda não foi definida." };
+      if (Number.isFinite(fee) && fee >= 0) return { allowed: true, fee, code: "FIXED", message: "Taxa fixa até 1 km." };
+      return { allowed: false, fee: 0, code: "DELIVERY_NOT_CONFIGURED", message: "A taxa até 1 km ainda não foi definida." };
     }
-    return { allowed: false, fee: 0, code: "BELOW_ONE_BLOCKED", message: "Pedidos abaixo de 1 km estão bloqueados para entrega." };
+    return { allowed: false, fee: 0, code: "BELOW_ONE_BLOCKED", message: "Pedidos até 1 km estão bloqueados para entrega." };
   }
 
   const range = (ranges || []).find(

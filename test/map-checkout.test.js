@@ -84,13 +84,14 @@ test("cliente fisicamente longe pode confirmar o destino no mapa", () => {
   assert.equal(assessment.fee, 3);
 });
 
-test("PIN confirmado acima de 3,5 km continua fora da área", () => {
+test("PIN histórico acima de 3,5 km não libera entrega própria", () => {
   const destination = locationAtDistance(4);
   const location = createMapPinLocation(destination, destination);
   const assessment = evaluateOrderDelivery("entrega", { ...location, km: 4 }, RANGES, SETTINGS);
   assert.equal(assessment.allowed, false);
-  assert.equal(assessment.code, "OUTSIDE_AREA");
-  assert.equal(assessment.message, "Este endereço está fora da nossa área de entrega.");
+  assert.equal(assessment.code, "UBER_AVAILABLE");
+  assert.equal(assessment.uberAvailable, true);
+  assert.equal(assessment.message, "Este endereço fica fora da nossa área de entrega própria.");
 });
 
 test("PIN grosseiramente distante da região do endereço é rejeitado", () => {

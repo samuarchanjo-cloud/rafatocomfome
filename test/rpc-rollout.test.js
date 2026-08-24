@@ -8,18 +8,20 @@ const legacyMigrationUrl = new URL("../supabase/migrations/20260720_admin_delive
 const trustedLocationMigrationUrl = new URL("../supabase/migrations/20260823_trusted_delivery_location.sql", import.meta.url);
 const consensusMigrationUrl = new URL("../supabase/migrations/20260824_address_consensus_delivery.sql", import.meta.url);
 const mapPinMigrationUrl = new URL("../supabase/migrations/20260824_map_pin_delivery.sql", import.meta.url);
+const routeMigrationUrl = new URL("../supabase/migrations/20260827_route_distance_and_uber_delivery.sql", import.meta.url);
 
 async function migrations() {
-  const [legacy, trustedLocation, consensus, mapPin] = await Promise.all([
+  const [legacy, trustedLocation, consensus, mapPin, route] = await Promise.all([
     readFile(legacyMigrationUrl, "utf8"),
     readFile(trustedLocationMigrationUrl, "utf8"),
     readFile(consensusMigrationUrl, "utf8"),
     readFile(mapPinMigrationUrl, "utf8"),
+    readFile(routeMigrationUrl, "utf8"),
   ]);
-  return { legacy, trustedLocation, consensus, mapPin };
+  return { legacy, trustedLocation, consensus, mapPin, route };
 }
 
-test("API nova chama exclusivamente place_order_v2", async () => {
+test("wrapper place_order_v2 permanece disponível para compatibilidade", async () => {
   const calls = [];
   const client = {
     async rpc(name, parameters) {
@@ -34,6 +36,15 @@ test("API nova chama exclusivamente place_order_v2", async () => {
   assert.equal(PLACE_ORDER_RPC, "place_order_v2");
   assert.deepEqual(calls, [{ name: "place_order_v2", parameters: { p_order: payload } }]);
   assert.deepEqual(result, { id: "order-v2" });
+});
+
+test("migration de rota cria v3 privado sem substituir place_order ou place_order_v2", async () => {
+  const { route } = await migrations();
+
+  assert.match(route, /create or replace function public\.place_order_v3\(p_order jsonb, p_route jsonb/i);
+  assert.doesNotMatch(route, /create or replace function public\.place_order(?:_v2)?\s*\(/i);
+  assert.doesNotMatch(route, /(?:drop|revoke all on) function public\.place_order(?:_v2)?\s*\(/i);
+  assert.match(route, /grant execute on function public\.place_order_v3\(jsonb, jsonb\) to service_role/i);
 });
 
 test("migration nova preserva o RPC place_order legado", async () => {

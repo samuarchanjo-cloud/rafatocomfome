@@ -148,14 +148,15 @@ test("baseline restaurada consulta uma vez o endereço completo e aceita número
   assert.equal(url.searchParams.has("viewbox"), false);
 });
 
-test("endereço residencial preciso acima de 3,5 km continua bloqueado normalmente", async () => {
+test("endereço residencial preciso acima de 3,5 km oferece Uber Entrega", async () => {
   const latitude = STORE.latitude + (4 / 111.195);
   installFetchMock({ candidates: [nominatimCandidate({ latitude, longitude: STORE.longitude })] });
   const { geocodeDeliveryAddress } = await loadAddressModule("exact-outside");
   const location = await geocodeDeliveryAddress(CABUCU);
   const { assessment } = assessLocation(location);
   assert.equal(assessment.allowed, false);
-  assert.equal(assessment.code, "OUTSIDE_AREA");
+  assert.equal(assessment.code, "UBER_AVAILABLE");
+  assert.equal(assessment.uberAvailable, true);
 });
 
 test("endereço residencial preciso entre 1 e 3,5 km usa a faixa existente", async () => {
@@ -210,7 +211,7 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
   assert.doesNotMatch(streetQuery, /23036-155/);
 });
 
-test("CEP normal com fallback de rua acima de 3,5 km continua recusado", async () => {
+test("CEP normal com fallback de rua acima de 3,5 km não usa entrega própria", async () => {
   const latitude = STORE.latitude + (4 / 111.195);
   installFetchMock({
     address: NORMAL_155,
@@ -222,7 +223,8 @@ test("CEP normal com fallback de rua acima de 3,5 km continua recusado", async (
   const location = await geocodeDeliveryAddress(NORMAL_155);
   const { assessment } = assessLocation(location);
   assert.equal(assessment.allowed, false);
-  assert.equal(assessment.code, "OUTSIDE_AREA");
+  assert.equal(assessment.code, "UBER_AVAILABLE");
+  assert.equal(assessment.uberAvailable, true);
 });
 
 test("número residencial diferente sem resultado de rua continua sendo rejeitado", async () => {
