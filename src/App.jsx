@@ -386,7 +386,13 @@ function App() {
     setValidatingAddress(true);
     setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
     try {
-      const coordinates = await locateDeliveryAddress(checkout, { signal: controller.signal });
+      const coordinates = await locateDeliveryAddress(checkout, {
+        signal: controller.signal,
+        storeCoordinates: {
+          latitude: Number(store.settings.store_latitude),
+          longitude: Number(store.settings.store_longitude),
+        },
+      });
       if (!isTrustedDeliveryLocation(coordinates)) {
         if (!openMapPicker(coordinates)) {
           setAddressValidationStatus({ type: "needs-gps", message: "Não encontramos a região do endereço. Revise os dados ou use sua localização atual." });

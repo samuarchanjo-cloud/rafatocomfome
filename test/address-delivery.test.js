@@ -19,6 +19,14 @@ const GIORDANO = {
   postalCode: "23036-050", street: "Rua Giordano Vincenzo", number: "515",
   neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
 };
+const LOLITA = {
+  postalCode: "23036-061", street: "Rua Lolita Rodrigues", number: "1",
+  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+};
+const WALDIR = {
+  postalCode: "23036-076", street: "Rua Waldir José de Melo", number: "1",
+  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+};
 const STORE = { latitude: -22.943800658459434, longitude: -43.582438704219854 };
 const SETTINGS = { maximum_delivery_distance_km: 3.5, below_one_km_behavior: "fixed", below_one_km_fee: 3 };
 const RANGES = [{ min_distance_km: 1, max_distance_km: 3.5, fee: 5, active: true }];
@@ -102,8 +110,8 @@ function installFetchMock({
     calls.push(url.toString());
     if (url.hostname === "viacep.com.br") return response(viaCep(viaCepAddress));
     if (url.hostname === "nominatim.openstreetmap.org") {
-      const query = url.searchParams.get("q") || "";
-      if (query.includes(`, ${address.number},`)) {
+      const street = url.searchParams.get("street") || "";
+      if (street.startsWith(`${address.number} `)) {
         if (exactError) throw exactError;
         return response(typeof exact === "function" ? exact() : exact);
       }
@@ -140,7 +148,7 @@ async function geocodeConsensusAt(km, address = CABUCU, extra = {}) {
     awesome: awesomeResult({ address, latitude, longitude: STORE.longitude }),
   });
   const { geocodeDeliveryAddress } = await loadAddressModule(`consensus-${km}-${address.postalCode}`);
-  return geocodeDeliveryAddress(address);
+  return geocodeDeliveryAddress(address, { storeCoordinates: STORE });
 }
 
 const originalFetch = globalThis.fetch;
@@ -161,7 +169,7 @@ test("A: número exato localizado a 0,6 km usa a localização exata normalmente
     })],
   });
   const { geocodeDeliveryAddress } = await loadAddressModule("giordano-exact-inside");
-  const location = await geocodeDeliveryAddress(GIORDANO);
+  const location = await geocodeDeliveryAddress(GIORDANO, { storeCoordinates: STORE });
   const { centerKm, assessment } = assessLocation(location);
   assert.equal(location.source, "nominatim_exact");
   assert.equal(location.precision, "exact");
@@ -179,7 +187,7 @@ test("B: endereço exato a 4 km continua fora da área", async () => {
     longitude: STORE.longitude,
   })] });
   const { geocodeDeliveryAddress } = await loadAddressModule("exact-outside");
-  const location = await geocodeDeliveryAddress(CABUCU);
+  const location = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
   const { assessment } = assessLocation(location);
   assert.equal(assessment.allowed, false);
   assert.equal(assessment.code, "OUTSIDE_AREA");
@@ -252,7 +260,7 @@ test("J: fontes de CEP significativamente divergentes produzem resultado ambígu
   });
   const { geocodeDeliveryAddress } = await loadAddressModule("ambiguous-services");
   await assert.rejects(
-    geocodeDeliveryAddress(CABUCU),
+    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
     (error) => error.code === "ADDRESS_AMBIGUOUS" && error.precision === "ambiguous" && error.differenceKm > 1,
   );
 });
@@ -261,7 +269,7 @@ test("K: CEP parcial do Nominatim não forma consenso sem uma fonte de CEP compl
   installFetchMock({ approximate: [nominatimCandidate({ postalCode: "23036" })], awesome: null });
   const { geocodeDeliveryAddress } = await loadAddressModule("partial-postcode");
   await assert.rejects(
-    geocodeDeliveryAddress(CABUCU),
+    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
     (error) => error.code === "ADDRESS_NOT_PRECISE",
   );
 });
@@ -273,7 +281,7 @@ test("L: endereço incompatível com o ViaCEP continua rejeitado", async () => {
   });
   const { geocodeDeliveryAddress } = await loadAddressModule("viacep-mismatch");
   await assert.rejects(
-    geocodeDeliveryAddress(CABUCU),
+    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
     (error) => error.code === "ADDRESS_POSTAL_CODE_MISMATCH",
   );
 });
@@ -299,7 +307,7 @@ test("N: retirada no local continua sem exigir localização", () => {
 test("timeout do Nominatim ainda permite consenso conservador pelo CEP completo", async () => {
   installFetchMock({ exactError: new TypeError("network timeout"), awesome: awesomeResult() });
   const { geocodeDeliveryAddress } = await loadAddressModule("nominatim-timeout");
-  const location = await geocodeDeliveryAddress(CABUCU);
+  const location = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
   assert.equal(location.source, "address_consensus");
   assert.equal(location.precision, "consensus");
   assert.equal(location.uncertainty, MIN_ADDRESS_UNCERTAINTY_M);
@@ -350,9 +358,58 @@ test("CACHE: consenso não impede uma nova tentativa exata para o mesmo número"
     awesome: awesomeResult(),
   });
   const { geocodeDeliveryAddress } = await loadAddressModule("consensus-cache");
-  const first = await geocodeDeliveryAddress(CABUCU);
+  const first = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
   assert.equal(first.precision, "consensus");
   exactCandidates = [nominatimCandidate({ houseNumber: CABUCU.number })];
-  const second = await geocodeDeliveryAddress(CABUCU);
+  const second = await geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE });
   assert.equal(second.source, "nominatim_exact");
+});
+
+test("Nominatim usa busca estruturada, CEP completo, viewbox local e bounded nos quatro CEPs", async () => {
+  for (const address of [LOLITA, WALDIR, CABUCU, GIORDANO]) {
+    const calls = installFetchMock({ address, awesome: awesomeResult({ address }) });
+    const { geocodeDeliveryAddress } = await loadAddressModule(`structured-${address.postalCode}`);
+    await geocodeDeliveryAddress(address, { storeCoordinates: STORE });
+    const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
+    assert.equal(nominatimCalls.length, 2, address.postalCode);
+    for (const [index, value] of nominatimCalls.entries()) {
+      const url = new URL(value);
+      assert.equal(url.searchParams.has("q"), false);
+      assert.equal(url.searchParams.get("city"), address.city);
+      assert.equal(url.searchParams.get("state"), address.state);
+      assert.equal(url.searchParams.get("postalcode"), address.postalCode);
+      assert.equal(url.searchParams.get("countrycodes"), "br");
+      assert.equal(url.searchParams.get("bounded"), "1");
+      assert.equal(url.searchParams.get("viewbox")?.split(",").length, 4);
+      assert.equal(url.searchParams.get("street"), index === 0 ? `${address.number} ${address.street}` : address.street);
+    }
+  }
+});
+
+test("candidato devolvido fora do raio local de 5 km é descartado defensivamente", async () => {
+  const farLatitude = STORE.latitude + (8 / 111.195);
+  installFetchMock({
+    exact: [nominatimCandidate({
+      houseNumber: CABUCU.number,
+      latitude: farLatitude,
+      longitude: STORE.longitude,
+    })],
+    approximate: [],
+    awesome: null,
+  });
+  const { geocodeDeliveryAddress } = await loadAddressModule("outside-local-radius");
+  await assert.rejects(
+    geocodeDeliveryAddress(CABUCU, { storeCoordinates: STORE }),
+    (error) => error.code === "ADDRESS_NOT_PRECISE",
+  );
+});
+
+test("viewbox de 5 km é derivada da coordenada da loja, sem coordenadas extras fixas", async () => {
+  const { buildLocalNominatimViewbox, NOMINATIM_LOCAL_SEARCH_RADIUS_KM } = await loadAddressModule("viewbox");
+  assert.equal(NOMINATIM_LOCAL_SEARCH_RADIUS_KM, 5);
+  const [left, top, right, bottom] = buildLocalNominatimViewbox(STORE).split(",").map(Number);
+  assert.ok(left < STORE.longitude && right > STORE.longitude);
+  assert.ok(bottom < STORE.latitude && top > STORE.latitude);
+  assert.ok(Math.abs((left + right) / 2 - STORE.longitude) < 1e-12);
+  assert.ok(Math.abs((top + bottom) / 2 - STORE.latitude) < 1e-12);
 });

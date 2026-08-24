@@ -123,7 +123,7 @@ export function mapCandidateFromError(error) {
   return sources.find((source) => source.source === "awesomeapi_cep") || sources[0] || null;
 }
 
-export async function locateDeliveryAddress(address, { signal } = {}) {
+export async function locateDeliveryAddress(address, { signal, storeCoordinates } = {}) {
   let googleCandidate = null;
   try {
     googleCandidate = await geocodeWithGoogle(address, { signal });
@@ -133,7 +133,7 @@ export async function locateDeliveryAddress(address, { signal } = {}) {
   }
 
   try {
-    return await geocodeDeliveryAddress(address, { signal });
+    return await geocodeDeliveryAddress(address, { signal, storeCoordinates });
   } catch (error) {
     if (error.name === "AbortError") throw error;
     if (googleCandidate) return googleCandidate;
