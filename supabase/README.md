@@ -76,6 +76,8 @@ supabase functions deploy delivery-routing
 
 A migration relevante é `migrations/20260827_route_distance_and_uber_delivery.sql`. Ela cria o RPC privado `place_order_v3`, acessível somente pela Edge Function com `service_role`; os RPCs `place_order` e `place_order_v2` permanecem intactos. A Edge Function recalcula rota, taxa, taxa de cartão e total no servidor. O navegador não é autoridade para `distance_km`, `delivery_fee` ou `total`.
 
+Se `20260827` já foi aplicada, execute também `migrations/20260828_fix_operational_delivery_fees.sql`. Ela corrige a faixa antiga preservada para R$ 5,00 entre 1,00 km e 3,50 km e mantém R$ 3,00 somente até 1,00 km.
+
 As regras operacionais são configuradas no Admin: até 1,00 km usa a taxa curta; acima de 1,00 km até o limite usa a taxa normal; acima do limite, o checkout oferece Uber Entrega sem adicionar frete ao pedido.
 
 ## Teste manual recomendado

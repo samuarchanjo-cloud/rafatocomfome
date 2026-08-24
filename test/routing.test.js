@@ -22,6 +22,7 @@ const RANGES = [{ min_distance_km: 1, max_distance_km: 3.5, fee: 12.75, active: 
 
 const edgeFunctionUrl = new URL("../supabase/functions/delivery-routing/index.ts", import.meta.url);
 const migrationUrl = new URL("../supabase/migrations/20260827_route_distance_and_uber_delivery.sql", import.meta.url);
+const feeFixMigrationUrl = new URL("../supabase/migrations/20260828_fix_operational_delivery_fees.sql", import.meta.url);
 const appUrl = new URL("../src/App.jsx", import.meta.url);
 const adminUrl = new URL("../src/components/AdminPanel.jsx", import.meta.url);
 const apiUrl = new URL("../src/lib/api.js", import.meta.url);
@@ -80,6 +81,35 @@ test("faixas usam configuração do Admin e não constantes de taxa", () => {
   assert.deepEqual(evaluateRouteQuote(3.51, RANGES, SETTINGS), {
     allowed: false, uberAvailable: true, deliveryFee: 0, code: "UBER_AVAILABLE",
   });
+});
+
+test("regressão comercial usa R$ 3 somente até 1 km e R$ 5 na faixa normal", () => {
+  const settings = {
+    maximum_delivery_distance_km: 3.5,
+    below_one_km_behavior: "fixed",
+    below_one_km_fee: 3,
+  };
+  const ranges = [{ min_distance_km: 1, max_distance_km: 3.5, fee: 5, active: true }];
+  for (const [distance, fee] of [[1, 3], [1.01, 5], [1.96, 5], [3.18, 5], [3.5, 5]]) {
+    assert.equal(evaluateRouteQuote(distance, ranges, settings).deliveryFee, fee, String(distance));
+  }
+  assert.deepEqual(evaluateRouteQuote(3.51, ranges, settings), {
+    allowed: false, uberAvailable: true, deliveryFee: 0, code: "UBER_AVAILABLE",
+  });
+});
+
+test("migration incremental corrige a taxa antiga preservada sem editar 20260827", async () => {
+  const [previousMigration, feeFixMigration] = await Promise.all([
+    readFile(migrationUrl, "utf8"),
+    readFile(feeFixMigrationUrl, "utf8"),
+  ]);
+  assert.match(previousMigration, /sem substituir a taxa já cadastrada pelo Admin/i);
+  assert.match(feeFixMigration, /below_one_km_behavior = 'fixed'/i);
+  assert.match(feeFixMigration, /below_one_km_fee = 3\.00/i);
+  assert.match(feeFixMigration, /maximum_delivery_distance_km = 3\.50/i);
+  assert.match(feeFixMigration, /set active = false[\s\S]*id <> v_operational_range_id/i);
+  assert.match(feeFixMigration, /min_distance_km = 1\.00,[\s\S]*max_distance_km = 3\.50,[\s\S]*fee = 5\.00,[\s\S]*active = true/i);
+  assert.doesNotMatch(feeFixMigration, /(?:delete from|truncate|drop table)/i);
 });
 
 test("nominatim_exact em 0,8 km e nominatim_street em 2 km usam a distância de rota", () => {

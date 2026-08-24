@@ -181,6 +181,45 @@ test("endereço sem house_number usa fallback da rua e não aciona AwesomeAPI", 
   assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
 });
 
+test("fallback de rua filtra todos os candidatos e escolhe o compatível mais próximo da loja", async () => {
+  const far = nominatimCandidate({ houseNumber: null, latitude: STORE.latitude + (10 / 111.195), longitude: STORE.longitude });
+  const expected = nominatimCandidate({ houseNumber: null, latitude: STORE.latitude + (2 / 111.195), longitude: STORE.longitude });
+  const wrongStreet = nominatimCandidate({
+    houseNumber: null,
+    road: "Rua Diferente",
+    latitude: STORE.latitude + (0.5 / 111.195),
+    longitude: STORE.longitude,
+  });
+  installFetchMock({
+    candidates: (url) => url.searchParams.get("q").includes(", 388,") ? [] : [far, expected, wrongStreet],
+  });
+  const { geocodeDeliveryAddress } = await loadAddressModule("street-ranking");
+  const location = await geocodeDeliveryAddress(CABUCU, {
+    origin: STORE,
+    maximumCandidateDistanceKm: 7,
+  });
+
+  assert.equal(location.source, "nominatim_street");
+  assert.equal(location.latitude, Number(expected.lat));
+  assert.equal(location.longitude, Number(expected.lon));
+});
+
+test("fallback aceita um único candidato correto próximo e rejeita candidato único implausivelmente distante", async () => {
+  const close = nominatimCandidate({ houseNumber: null, latitude: STORE.latitude + (2 / 111.195), longitude: STORE.longitude });
+  installFetchMock({ candidates: (url) => url.searchParams.get("q").includes(", 388,") ? [] : [close] });
+  let module = await loadAddressModule("single-close-street");
+  const location = await module.geocodeDeliveryAddress(CABUCU, { origin: STORE, maximumCandidateDistanceKm: 7 });
+  assert.equal(location.latitude, Number(close.lat));
+
+  const far = nominatimCandidate({ houseNumber: null, latitude: STORE.latitude + (10 / 111.195), longitude: STORE.longitude });
+  installFetchMock({ candidates: (url) => url.searchParams.get("q").includes(", 388,") ? [] : [far] });
+  module = await loadAddressModule("single-far-street");
+  await assert.rejects(
+    module.geocodeDeliveryAddress(CABUCU, { origin: STORE, maximumCandidateDistanceKm: 7 }),
+    (error) => error.code === "ADDRESS_NOT_PRECISE" && error.diagnosticCode === "CANDIDATE_OUTSIDE_EXPECTED_REGION",
+  );
+});
+
 test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", async () => {
   const latitude = STORE.latitude + (2 / 111.195);
   const calls = installFetchMock({
@@ -209,6 +248,7 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
   const streetQuery = new URL(nominatimCalls[1]).searchParams.get("q");
   assert.doesNotMatch(streetQuery, /, 80,/);
   assert.doesNotMatch(streetQuery, /23036-155/);
+  assert.doesNotMatch(streetQuery, /Campo Grande/);
 });
 
 test("CEP normal com fallback de rua acima de 3,5 km não usa entrega própria", async () => {
@@ -244,6 +284,38 @@ test("fallback de rua rejeita rua, cidade ou estado incompatíveis", async () =>
   installFetchMock({ candidates: incompatibleCandidates });
   const { geocodeDeliveryAddress } = await loadAddressModule("incompatible-result");
   await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
+});
+
+test("diagnóstico diferencia rua, cidade, estado, coordenadas e ausência de resultado", async () => {
+  const cases = [
+    ["street", [nominatimCandidate({ houseNumber: null, road: "Rua Diferente" })], "STREET_MISMATCH"],
+    ["city", [nominatimCandidate({ houseNumber: null, city: "Niterói" })], "CITY_MISMATCH"],
+    ["state", [nominatimCandidate({ houseNumber: null, state: "São Paulo" })], "STATE_MISMATCH"],
+    ["coordinates", [nominatimCandidate({ houseNumber: null, latitude: 999 })], "INVALID_COORDINATES"],
+    ["empty", [], "NOMINATIM_STREET_NOT_FOUND"],
+  ];
+
+  for (const [name, streetCandidates, diagnosticCode] of cases) {
+    installFetchMock({ candidates: (url) => url.searchParams.get("q").includes(", 388,") ? [] : streetCandidates });
+    const { geocodeDeliveryAddress } = await loadAddressModule(`diagnostic-${name}`);
+    await assert.rejects(
+      geocodeDeliveryAddress(CABUCU, { origin: STORE, maximumCandidateDistanceKm: 7 }),
+      (error) => error.code === "ADDRESS_NOT_PRECISE" && error.diagnosticCode === diagnosticCode,
+    );
+  }
+});
+
+test("logs detalhados de geocodificação ficam restritos ao modo de desenvolvimento", async () => {
+  const source = await readFile(new URL("../src/lib/address.js", import.meta.url), "utf8");
+  assert.match(source, /import\.meta\.env\?\.DEV/);
+  for (const code of [
+    "NOMINATIM_EXACT_NOT_FOUND",
+    "NOMINATIM_STREET_NOT_FOUND",
+    "STREET_MISMATCH",
+    "CITY_MISMATCH",
+    "STATE_MISMATCH",
+    "INVALID_COORDINATES",
+  ]) assert.match(source, new RegExp(code));
 });
 
 test("ViaCEP incompatível interrompe a resolução antes do Nominatim", async () => {

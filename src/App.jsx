@@ -375,7 +375,18 @@ function App() {
       }
 
       setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
-      const coordinates = await locateDeliveryAddress(checkout, { signal: controller.signal, postalAddress });
+      const maximumDeliveryDistanceKm = Number(store.settings.maximum_delivery_distance_km);
+      const coordinates = await locateDeliveryAddress(checkout, {
+        signal: controller.signal,
+        postalAddress,
+        origin: {
+          latitude: Number(store.settings.store_latitude),
+          longitude: Number(store.settings.store_longitude),
+        },
+        maximumCandidateDistanceKm: Number.isFinite(maximumDeliveryDistanceKm)
+          ? Math.max(maximumDeliveryDistanceKm * 2, maximumDeliveryDistanceKm + 2)
+          : undefined,
+      });
       if (!isTrustedDeliveryLocation(coordinates)) {
         setAddressValidationStatus({ type: "error", message: "O endereço não pôde ser localizado com precisão." });
         return;
