@@ -7,7 +7,7 @@ export const DEVICE_GPS_OPTIONS = Object.freeze({
   maximumAge: 0,
 });
 
-const TRUSTED_EXACT_LOCATION_SOURCES = new Set(["nominatim_exact", "device_gps"]);
+const TRUSTED_EXACT_LOCATION_SOURCES = new Set(["nominatim_exact", "google_exact", "device_gps", "map_pin"]);
 
 function locationError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -40,7 +40,7 @@ export function isTrustedDeliveryLocation(location) {
   }
 
   if (location.precision !== "exact" || !TRUSTED_EXACT_LOCATION_SOURCES.has(location.source)) return false;
-  if (location.source === "nominatim_exact") return true;
+  if (["nominatim_exact", "google_exact", "map_pin"].includes(location.source)) return true;
 
   return (
     Number.isFinite(Number(location.accuracy)) &&

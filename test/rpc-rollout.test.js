@@ -7,14 +7,16 @@ import { callPlaceOrderRpc, PLACE_ORDER_RPC } from "../src/lib/orderRpc.js";
 const legacyMigrationUrl = new URL("../supabase/migrations/20260720_admin_delivery_security.sql", import.meta.url);
 const trustedLocationMigrationUrl = new URL("../supabase/migrations/20260823_trusted_delivery_location.sql", import.meta.url);
 const consensusMigrationUrl = new URL("../supabase/migrations/20260824_address_consensus_delivery.sql", import.meta.url);
+const mapPinMigrationUrl = new URL("../supabase/migrations/20260824_map_pin_delivery.sql", import.meta.url);
 
 async function migrations() {
-  const [legacy, trustedLocation, consensus] = await Promise.all([
+  const [legacy, trustedLocation, consensus, mapPin] = await Promise.all([
     readFile(legacyMigrationUrl, "utf8"),
     readFile(trustedLocationMigrationUrl, "utf8"),
     readFile(consensusMigrationUrl, "utf8"),
+    readFile(mapPinMigrationUrl, "utf8"),
   ]);
-  return { legacy, trustedLocation, consensus };
+  return { legacy, trustedLocation, consensus, mapPin };
 }
 
 test("API nova chama exclusivamente place_order_v2", async () => {
@@ -105,4 +107,35 @@ test("coluna de incerteza é nullable e preserva pedidos antigos", async () => {
   assert.doesNotMatch(consensus, /location_uncertainty_m[^,;\n]*not null/i);
   assert.match(consensus, /location_source is null and location_uncertainty_m is null/i);
   assert.match(consensus, /location_source = 'address_consensus' and location_uncertainty_m >= 750/i);
+});
+
+test("migration do PIN preserva migrations executadas e o place_order legado", async () => {
+  const { trustedLocation, consensus, mapPin } = await migrations();
+
+  assert.doesNotMatch(trustedLocation, /map_pin|google_exact/i);
+  assert.doesNotMatch(consensus, /map_pin|google_exact/i);
+  assert.doesNotMatch(mapPin, /function public\.place_order\s*\(/i);
+  assert.doesNotMatch(mapPin, /(?:drop|revoke all on) function public\.place_order\s*\(/i);
+  assert.match(mapPin, /create or replace function public\.place_order_v2\(p_order jsonb\)/i);
+});
+
+test("place_order_v2 aceita map_pin confirmado e google_exact", async () => {
+  const { mapPin } = await migrations();
+
+  assert.match(mapPin, /'nominatim_exact', 'google_exact', 'device_gps', 'map_pin', 'address_consensus'/i);
+  assert.match(mapPin, /v_location_source = 'map_pin'/i);
+  assert.match(mapPin, /p_order->>'map_pin_confirmed'/i);
+  assert.match(mapPin, /raise exception 'MAP_PIN_CONFIRMATION_REQUIRED'/i);
+  assert.match(mapPin, /public\.haversine_distance_km/i);
+});
+
+test("PIN, GPS e endereço exato acima do limite continuam OUTSIDE_DELIVERY_AREA", async () => {
+  const { mapPin } = await migrations();
+
+  assert.match(
+    mapPin,
+    /v_location_source <> 'address_consensus' and v_distance > v_settings\.maximum_delivery_distance_km[\s\S]*OUTSIDE_DELIVERY_AREA/i,
+  );
+  assert.match(mapPin, /where active and v_distance between min_distance_km and max_distance_km/i);
+  assert.match(mapPin, /v_total := v_subtotal \+ v_delivery_fee \+ v_card_fee/i);
 });

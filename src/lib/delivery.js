@@ -51,7 +51,7 @@ export function evaluateDelivery(distance, ranges, settings, precision = "exact"
         message: "Não conseguimos confirmar com segurança se este endereço está dentro da área de entrega.",
       };
     }
-    return { allowed: false, fee: 0, code: "OUTSIDE_AREA", message: `Endereço fora da área máxima de ${maximum.toFixed(2)} km.` };
+    return { allowed: false, fee: 0, code: "OUTSIDE_AREA", message: "Este endereço está fora da nossa área de entrega." };
   }
 
   if (roundedDistance < 1) {

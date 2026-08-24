@@ -589,18 +589,23 @@ export async function geocodeDeliveryAddress(address, { signal } = {}) {
   if (consensusResult) return consensusResult;
 
   if (nominatimUnavailableError || postalServiceUnavailableError) {
+    const sources = [nominatimApproximateResult, postalResult].filter(Boolean);
     throw addressError(
       "GEOCODING_UNAVAILABLE",
       "Não foi possível consultar todos os serviços de localização agora. Tente novamente em instantes.",
       {
         services: [nominatimUnavailableError?.service || "nominatim", postalServiceUnavailableError?.service]
           .filter(Boolean),
+        sources,
+        mapCandidate: postalResult || nominatimApproximateResult || null,
       },
     );
   }
 
+  const sources = [nominatimApproximateResult, postalResult].filter(Boolean);
   throw addressError(
     "ADDRESS_NOT_PRECISE",
     "O endereço não pôde ser localizado. Revise CEP, rua, número, bairro, cidade e estado.",
+    { sources, mapCandidate: postalResult || nominatimApproximateResult || null },
   );
 }
