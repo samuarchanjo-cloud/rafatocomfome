@@ -307,4 +307,3 @@ revoke all on function public.place_order_v2(jsonb) from public;
 grant execute on function public.place_order_v2(jsonb) to anon, authenticated;
 
 commit;
-
