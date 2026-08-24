@@ -1,101 +1,9 @@
+-- Correção incremental para bancos que já receberam as migrations
+-- 20260824_postal_delivery_zones.sql e 20260825_delivery_area_rules.sql.
+-- O checkout usa somente CEP exact como exceção financeira; os demais CEPs
+-- continuam no fluxo geográfico Nominatim + Haversine.
+
 begin;
-
-alter table public.delivery_postal_zones
-  add column if not exists match_type text,
-  add column if not exists postal_prefix text,
-  add column if not exists postal_code_start text,
-  add column if not exists postal_code_end text,
-  add column if not exists neighborhood text,
-  add column if not exists priority integer not null default 0;
-
-update public.delivery_postal_zones
-set match_type = 'exact'
-where match_type is null;
-
-alter table public.delivery_postal_zones
-  alter column match_type set default 'exact',
-  alter column match_type set not null,
-  alter column postal_code drop not null;
-
-alter table public.delivery_postal_zones
-  drop constraint if exists delivery_postal_zones_postal_code_key,
-  drop constraint if exists delivery_postal_zones_match_type_allowed,
-  drop constraint if exists delivery_postal_zones_rule_shape;
-
-alter table public.delivery_postal_zones
-  add constraint delivery_postal_zones_match_type_allowed
-    check (match_type in ('exact', 'prefix', 'range', 'neighborhood')),
-  add constraint delivery_postal_zones_rule_shape
-    check (
-      (
-        match_type = 'exact'
-        and postal_code ~ '^[0-9]{8}$'
-        and postal_prefix is null
-        and postal_code_start is null
-        and postal_code_end is null
-        and neighborhood is null
-      )
-      or (
-        match_type = 'prefix'
-        and postal_code is null
-        and postal_prefix ~ '^[0-9]{1,8}$'
-        and postal_code_start is null
-        and postal_code_end is null
-        and neighborhood is null
-      )
-      or (
-        match_type = 'range'
-        and postal_code is null
-        and postal_prefix is null
-        and postal_code_start ~ '^[0-9]{8}$'
-        and postal_code_end ~ '^[0-9]{8}$'
-        and postal_code_start <= postal_code_end
-        and neighborhood is null
-      )
-      or (
-        match_type = 'neighborhood'
-        and postal_code is null
-        and postal_prefix is null
-        and postal_code_start is null
-        and postal_code_end is null
-        and length(trim(neighborhood)) > 0
-      )
-    );
-
-create index if not exists delivery_postal_zones_active_prefix_idx
-  on public.delivery_postal_zones(postal_prefix)
-  where active and match_type = 'prefix';
-
-create index if not exists delivery_postal_zones_active_range_idx
-  on public.delivery_postal_zones(postal_code_start, postal_code_end)
-  where active and match_type = 'range';
-
-create index if not exists delivery_postal_zones_active_neighborhood_idx
-  on public.delivery_postal_zones(neighborhood)
-  where active and match_type = 'neighborhood';
-
-create or replace function public.normalize_delivery_neighborhood(p_value text)
-returns text
-language sql
-immutable
-parallel safe
-set search_path = public, pg_temp
-as $$
-  select regexp_replace(
-    trim(translate(
-      lower(coalesce(p_value, '')),
-      'áàâãäéèêëíìîïóòôõöúùûüç',
-      'aaaaaeeeeiiiiooooouuuuc'
-    )),
-    '\s+',
-    ' ',
-    'g'
-  );
-$$;
-
-create index if not exists delivery_postal_zones_active_neighborhood_normalized_idx
-  on public.delivery_postal_zones(public.normalize_delivery_neighborhood(neighborhood))
-  where active and match_type = 'neighborhood';
 
 create or replace function public.resolve_delivery_area(
   p_postal_code text,
@@ -107,8 +15,8 @@ stable
 security definer
 set search_path = public, pg_temp
 as $$
-  -- p_neighborhood é reservado para uso futuro, após validação server-side CEP ↔ bairro.
-  -- Nesta versão ele nunca participa de uma decisão financeira.
+  -- p_neighborhood, prefix e range permanecem estruturados para uso futuro,
+  -- mas não participam da decisão financeira de pedidos nesta versão.
   with request as (
     select regexp_replace(coalesce(p_postal_code, ''), '[^0-9]', '', 'g') as postal_code
   )
@@ -117,54 +25,47 @@ as $$
   cross join request
   where zone.active
     and length(request.postal_code) = 8
-    and (
-      (zone.match_type = 'exact' and zone.postal_code = request.postal_code)
-      or (
-        zone.match_type = 'prefix'
-        and left(request.postal_code, length(zone.postal_prefix)) = zone.postal_prefix
-      )
-      or (
-        zone.match_type = 'range'
-        and request.postal_code between zone.postal_code_start and zone.postal_code_end
-      )
-    )
+    and zone.match_type = 'exact'
+    and zone.postal_code = request.postal_code
   order by
-    case zone.match_type
-      when 'exact' then 1
-      when 'prefix' then 2
-      when 'range' then 3
-    end,
-    case zone.match_type
-      when 'exact' then 8
-      when 'prefix' then length(zone.postal_prefix)
-      when 'range' then -((zone.postal_code_end::bigint) - (zone.postal_code_start::bigint))
-    end desc,
     zone.priority desc,
     zone.created_at asc,
     zone.id asc
   limit 1;
 $$;
 
--- Compatibilidade temporária com o frontend anterior: regras baseadas somente
--- em CEP continuam resolvidas pela assinatura pública antiga.
-create or replace function public.get_delivery_postal_zone(p_postal_code text)
-returns table (postal_code text, delivery_fee numeric)
-language sql
-stable
-security definer
-set search_path = public, pg_temp
-as $$
-  select
-    regexp_replace(coalesce(p_postal_code, ''), '[^0-9]', '', 'g') as postal_code,
-    area.delivery_fee
-  from public.resolve_delivery_area(p_postal_code, null) area;
-$$;
-
-revoke all on function public.normalize_delivery_neighborhood(text) from public;
 revoke all on function public.resolve_delivery_area(text, text) from public;
 grant execute on function public.resolve_delivery_area(text, text) to anon, authenticated;
-revoke all on function public.get_delivery_postal_zone(text) from public;
-grant execute on function public.get_delivery_postal_zone(text) to anon, authenticated;
+
+alter table public.orders drop constraint if exists orders_location_source_allowed;
+alter table public.orders
+  add constraint orders_location_source_allowed
+  check (
+    location_source is null
+    or location_source in ('nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone')
+  );
+
+alter table public.orders drop constraint if exists orders_location_accuracy_valid;
+alter table public.orders
+  add constraint orders_location_accuracy_valid
+  check (
+    (location_source is null and location_accuracy_m is null)
+    or (location_source in ('nominatim_exact', 'nominatim_street', 'google_exact', 'map_pin', 'address_consensus', 'postal_zone') and location_accuracy_m is null)
+    or (
+      location_source = 'device_gps'
+      and location_accuracy_m > 0
+      and location_accuracy_m <= 150
+    )
+  );
+
+alter table public.orders drop constraint if exists orders_location_uncertainty_valid;
+alter table public.orders
+  add constraint orders_location_uncertainty_valid
+  check (
+    (location_source is null and location_uncertainty_m is null)
+    or (location_source in ('nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'postal_zone') and location_uncertainty_m is null)
+    or (location_source = 'address_consensus' and location_uncertainty_m >= 750)
+  );
 
 create or replace function public.place_order_v2(p_order jsonb)
 returns jsonb
@@ -234,7 +135,7 @@ begin
   if v_delivery_type = 'entrega' then
     if length(trim(coalesce(p_order->>'address', ''))) < 5 then raise exception 'INVALID_ADDRESS'; end if;
     if v_location_source is null
-       or v_location_source not in ('nominatim_exact', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone') then
+       or v_location_source not in ('nominatim_exact', 'nominatim_street', 'google_exact', 'device_gps', 'map_pin', 'address_consensus', 'postal_zone') then
       raise exception 'INVALID_LOCATION_SOURCE';
     end if;
 
@@ -406,3 +307,4 @@ revoke all on function public.place_order_v2(jsonb) from public;
 grant execute on function public.place_order_v2(jsonb) to anon, authenticated;
 
 commit;
+

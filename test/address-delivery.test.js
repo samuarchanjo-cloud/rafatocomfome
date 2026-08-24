@@ -30,8 +30,8 @@ const WALDIR = {
   neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
 };
 const NORMAL_155 = {
-  postalCode: "23036-155", street: "Rua Projetada Um", number: "120",
-  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+  postalCode: "23036-155", street: "Rua Alfredo Britto", number: "80",
+  neighborhood: "Campo Grande", city: "Rio de Janeiro", state: "RJ",
 };
 const STORE = { latitude: -22.943800658459434, longitude: -43.582438704219854 };
 const SETTINGS = { maximum_delivery_distance_km: 3.5, below_one_km_behavior: "fixed", below_one_km_fee: 3 };
@@ -183,7 +183,7 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
   const latitude = STORE.latitude + (2 / 111.195);
   const calls = installFetchMock({
     address: NORMAL_155,
-    candidates: (url) => url.searchParams.get("q").includes(", 120,")
+    candidates: (url) => url.searchParams.get("q").includes(", 80,")
       ? []
       : [nominatimCandidate({ address: NORMAL_155, houseNumber: null, latitude, longitude: STORE.longitude })],
   });
@@ -197,14 +197,14 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
   assert.equal(assessment.fee, 5);
   const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
   assert.equal(nominatimCalls.length, 2);
-  assert.doesNotMatch(new URL(nominatimCalls[1]).searchParams.get("q"), /, 120,/);
+  assert.doesNotMatch(new URL(nominatimCalls[1]).searchParams.get("q"), /, 80,/);
 });
 
 test("CEP normal com fallback de rua acima de 3,5 km continua recusado", async () => {
   const latitude = STORE.latitude + (4 / 111.195);
   installFetchMock({
     address: NORMAL_155,
-    candidates: (url) => url.searchParams.get("q").includes(", 120,")
+    candidates: (url) => url.searchParams.get("q").includes(", 80,")
       ? []
       : [nominatimCandidate({ address: NORMAL_155, houseNumber: null, latitude, longitude: STORE.longitude })],
   });
