@@ -120,8 +120,6 @@ function isStreetAddressCandidate(candidate, address) {
   const details = candidate?.address || {};
   const latitude = Number(candidate?.lat);
   const longitude = Number(candidate?.lon);
-  const expectedPostalCode = postalCodeDigits(address.postalCode);
-  const returnedPostalCode = postalCodeDigits(details.postcode);
   const returnedStreet = details.road || details.pedestrian || details.residential || details.street;
 
   return (
@@ -130,8 +128,7 @@ function isStreetAddressCandidate(candidate, address) {
     details.country_code === "br" &&
     matchesStreet(address.street, returnedStreet) &&
     matchesCity(address.city, details) &&
-    matchesState(address.state, details) &&
-    (!returnedPostalCode || returnedPostalCode === expectedPostalCode)
+    matchesState(address.state, details)
   );
 }
 
@@ -360,7 +357,6 @@ export async function geocodeDeliveryAddress(address, { signal, postalAddress: s
     address.street.trim(),
     address.neighborhood.trim(),
     `${address.city.trim()} - ${address.state.trim()}`,
-    formatPostalCode(address.postalCode),
     "Brasil",
   ].join(", ");
   await waitForNominatimRateLimit();
@@ -389,7 +385,7 @@ export async function geocodeDeliveryAddress(address, { signal, postalAddress: s
     displayName: streetCandidate.display_name,
     precision: "street",
     source: "nominatim_street",
-    postalCode: formatPostalCode(streetCandidate.address?.postcode || address.postalCode),
+    postalCode: formatPostalCode(address.postalCode),
     type: streetCandidate.type || null,
     addresstype: streetCandidate.addresstype || null,
   };

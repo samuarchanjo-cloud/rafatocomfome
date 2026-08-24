@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { distanceInKm, effectiveDeliveryDistance, evaluateOrderDelivery } from "../src/lib/delivery.js";
 import { locateDeliveryAddress } from "../src/lib/geocodingProvider.js";
+import { createPostalZoneLocation } from "../src/lib/postalZone.js";
 import {
   createDeviceGpsLocation,
   DEVICE_GPS_OPTIONS,
@@ -185,19 +186,28 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
     address: NORMAL_155,
     candidates: (url) => url.searchParams.get("q").includes(", 80,")
       ? []
-      : [nominatimCandidate({ address: NORMAL_155, houseNumber: null, latitude, longitude: STORE.longitude })],
+      : [nominatimCandidate({
+        address: NORMAL_155,
+        houseNumber: null,
+        postalCode: "23036-053",
+        latitude,
+        longitude: STORE.longitude,
+      })],
   });
   const { geocodeDeliveryAddress } = await loadAddressModule("normal-23036-155");
   const location = await geocodeDeliveryAddress(NORMAL_155);
   const { centerKm, assessment } = assessLocation(location);
 
   assert.equal(location.source, "nominatim_street");
+  assert.equal(location.postalCode, "23036-155");
   assert.ok(centerKm > 1.99 && centerKm < 2.01);
   assert.equal(assessment.allowed, true);
   assert.equal(assessment.fee, 5);
   const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
   assert.equal(nominatimCalls.length, 2);
-  assert.doesNotMatch(new URL(nominatimCalls[1]).searchParams.get("q"), /, 80,/);
+  const streetQuery = new URL(nominatimCalls[1]).searchParams.get("q");
+  assert.doesNotMatch(streetQuery, /, 80,/);
+  assert.doesNotMatch(streetQuery, /23036-155/);
 });
 
 test("CEP normal com fallback de rua acima de 3,5 km continua recusado", async () => {
@@ -223,12 +233,11 @@ test("número residencial diferente sem resultado de rua continua sendo rejeitad
   await assert.rejects(geocodeDeliveryAddress(CABUCU), (error) => error.code === "ADDRESS_NOT_PRECISE");
 });
 
-test("rua, cidade, estado e CEP retornados precisam ser compatíveis", async () => {
+test("fallback de rua rejeita rua, cidade ou estado incompatíveis", async () => {
   const incompatibleCandidates = [
     nominatimCandidate({ road: "Rua Diferente" }),
     nominatimCandidate({ city: "Niterói" }),
     nominatimCandidate({ state: "São Paulo" }),
-    nominatimCandidate({ postalCode: "23036-999" }),
   ];
   installFetchMock({ candidates: incompatibleCandidates });
   const { geocodeDeliveryAddress } = await loadAddressModule("incompatible-result");
@@ -262,28 +271,28 @@ test("falha não é armazenada no cache e nova tentativa pode encontrar o númer
   assert.equal(location.source, "nominatim_exact");
 });
 
-test("quatro CEPs de regressão não aceitam os resultados aproximados observados", async () => {
+test("fallback de rua aceita postcode divergente, mas continua exigindo correspondência geográfica", async () => {
   const cases = [
-    [LOLITA, [nominatimCandidate({ address: LOLITA, houseNumber: null, postalCode: "23030-440", latitude: -22.9480261, longitude: -43.5844627 })]],
-    [WALDIR, []],
-    [CABUCU, [
-      nominatimCandidate({ houseNumber: null, postalCode: "23036-053", latitude: -22.940458, longitude: -43.5799353 }),
-      nominatimCandidate({ houseNumber: null, postalCode: "23030-440", latitude: -22.9451175, longitude: -43.5820797 }),
-    ]],
-    [GIORDANO, []],
+    [LOLITA, nominatimCandidate({ address: LOLITA, houseNumber: null, postalCode: "23030-440", latitude: -22.9480261, longitude: -43.5844627 })],
+    [CABUCU, nominatimCandidate({ houseNumber: null, postalCode: "23036-053", latitude: -22.940458, longitude: -43.5799353 })],
   ];
 
-  for (const [address, candidates] of cases) {
-    const calls = installFetchMock({ address, candidates });
+  for (const [address, candidate] of cases) {
+    const calls = installFetchMock({
+      address,
+      candidates: (url) => url.searchParams.get("q").includes(`, ${address.number},`) ? [] : [candidate],
+    });
     const { geocodeDeliveryAddress } = await loadAddressModule(`regression-${address.postalCode}`);
-    await assert.rejects(
-      geocodeDeliveryAddress(address),
-      (error) => error.code === "ADDRESS_NOT_PRECISE",
-      address.postalCode,
-    );
+    const location = await geocodeDeliveryAddress(address);
+    assert.equal(location.source, "nominatim_street");
+    assert.equal(location.postalCode, address.postalCode);
     assert.equal(calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org").length, 2);
     assert.equal(calls.some((value) => new URL(value).hostname === "cep.awesomeapi.com.br"), false);
   }
+
+  installFetchMock({ address: WALDIR, candidates: [] });
+  const { geocodeDeliveryAddress } = await loadAddressModule("street-no-result");
+  await assert.rejects(geocodeDeliveryAddress(WALDIR), (error) => error.code === "ADDRESS_NOT_PRECISE");
 });
 
 test("provedor automático prioriza a resolução exata do Nominatim", async () => {
@@ -294,6 +303,25 @@ test("provedor automático prioriza a resolução exata do Nominatim", async () 
     [...new Set(calls.map((value) => new URL(value).hostname))],
     ["viacep.com.br", "nominatim.openstreetmap.org"],
   );
+});
+
+test("CEPs 23036-061 e 23036-076 com exceção exact validam ViaCEP e não chamam Nominatim", async () => {
+  for (const address of [LOLITA, WALDIR]) {
+    const calls = installFetchMock({ address, candidates: () => { throw new Error("Nominatim não deveria ser chamado"); } });
+    const { validateDeliveryPostalAddress } = await loadAddressModule(`exact-zone-${address.postalCode}`);
+    await validateDeliveryPostalAddress(address);
+    const location = createPostalZoneLocation({
+      id: `exact-${address.postalCode}`,
+      deliveryFee: 3,
+      matchType: "exact",
+    }, address.postalCode);
+
+    assert.equal(location.source, "postal_zone");
+    assert.deepEqual(
+      [...new Set(calls.map((value) => new URL(value).hostname))],
+      ["viacep.com.br"],
+    );
+  }
 });
 
 test("checkout valida ViaCEP, consulta exceção exact e somente depois chama o geocoder", async () => {
