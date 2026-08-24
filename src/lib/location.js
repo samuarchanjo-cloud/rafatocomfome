@@ -1,4 +1,5 @@
 export const MAX_DEVICE_GPS_ACCURACY_M = 150;
+export const MIN_ADDRESS_UNCERTAINTY_M = 750;
 
 export const DEVICE_GPS_OPTIONS = Object.freeze({
   enableHighAccuracy: true,
@@ -6,14 +7,14 @@ export const DEVICE_GPS_OPTIONS = Object.freeze({
   maximumAge: 0,
 });
 
-const TRUSTED_LOCATION_SOURCES = new Set(["nominatim_exact", "device_gps"]);
+const TRUSTED_EXACT_LOCATION_SOURCES = new Set(["nominatim_exact", "device_gps"]);
 
 function locationError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
 export function isTrustedDeliveryLocation(location) {
-  if (!location || location.precision !== "exact" || !TRUSTED_LOCATION_SOURCES.has(location.source)) {
+  if (!location) {
     return false;
   }
 
@@ -30,6 +31,15 @@ export function isTrustedDeliveryLocation(location) {
     return false;
   }
 
+  if (location.source === "address_consensus") {
+    return (
+      location.precision === "consensus" &&
+      Number.isFinite(Number(location.uncertainty)) &&
+      Number(location.uncertainty) >= MIN_ADDRESS_UNCERTAINTY_M
+    );
+  }
+
+  if (location.precision !== "exact" || !TRUSTED_EXACT_LOCATION_SOURCES.has(location.source)) return false;
   if (location.source === "nominatim_exact") return true;
 
   return (

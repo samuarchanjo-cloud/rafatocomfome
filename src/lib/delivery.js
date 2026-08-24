@@ -1,3 +1,5 @@
+import { MIN_ADDRESS_UNCERTAINTY_M } from "./location.js";
+
 export function distanceInKm(origin, destination) {
   const earthRadiusKm = 6371;
   const toRad = (value) => (value * Math.PI) / 180;
@@ -11,8 +13,18 @@ export function distanceInKm(origin, destination) {
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+export function effectiveDeliveryDistance(centerDistanceKm, location) {
+  const center = Number(centerDistanceKm);
+  if (!Number.isFinite(center)) return Number.NaN;
+  const roundedCenter = Math.round(center * 100) / 100;
+  if (location?.source !== "address_consensus") return roundedCenter;
+  const uncertaintyM = Math.max(Number(location.uncertainty) || 0, MIN_ADDRESS_UNCERTAINTY_M);
+  return roundedCenter + (uncertaintyM / 1000);
+}
+
 export function evaluateDelivery(distance, ranges, settings, precision = "exact") {
-  if (precision !== "exact") {
+  const isConsensus = precision === "consensus";
+  if (precision !== "exact" && !isConsensus) {
     return {
       allowed: false,
       fee: 0,
@@ -31,6 +43,14 @@ export function evaluateDelivery(distance, ranges, settings, precision = "exact"
     return { allowed: false, fee: 0, code: "DELIVERY_NOT_CONFIGURED", message: "A área de entrega ainda não foi configurada." };
   }
   if (roundedDistance > maximum) {
+    if (isConsensus) {
+      return {
+        allowed: false,
+        fee: 0,
+        code: "ADDRESS_REQUIRES_CONFIRMATION",
+        message: "Não conseguimos confirmar com segurança se este endereço está dentro da área de entrega.",
+      };
+    }
     return { allowed: false, fee: 0, code: "OUTSIDE_AREA", message: `Endereço fora da área máxima de ${maximum.toFixed(2)} km.` };
   }
 
@@ -62,7 +82,9 @@ export function evaluateOrderDelivery(deliveryType, location, ranges, settings) 
     return { allowed: true, fee: 0, code: "PICKUP", message: "Retirada no local." };
   }
 
-  return evaluateDelivery(location?.km, ranges, settings, location?.precision || "exact");
+  const centerDistance = Number.isFinite(Number(location?.centerKm)) ? Number(location.centerKm) : location?.km;
+  const assessedDistance = effectiveDeliveryDistance(centerDistance, location);
+  return evaluateDelivery(assessedDistance, ranges, settings, location?.precision || "exact");
 }
 
 export function validateDeliveryRanges(ranges) {

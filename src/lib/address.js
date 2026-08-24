@@ -1,3 +1,5 @@
+import { MIN_ADDRESS_UNCERTAINTY_M } from "./location.js";
+
 const VIA_CEP_ENDPOINT = "https://viacep.com.br/ws";
 const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
 const AWESOME_CEP_ENDPOINT = "https://cep.awesomeapi.com.br/json";
@@ -95,6 +97,8 @@ function candidateMetadata(candidate) {
     type: candidate?.type || null,
     addresstype: candidate?.addresstype || null,
     placeRank: Number.isFinite(Number(candidate?.place_rank)) ? Number(candidate.place_rank) : null,
+    boundingBox: Array.isArray(candidate?.boundingbox) ? candidate.boundingbox.map(Number) : null,
+    boundingBoxRadiusM: boundingBoxRadiusM(candidate),
   };
 }
 
@@ -129,6 +133,28 @@ function distanceBetweenCoordinatesKm(first, second) {
     Math.sin(latitudeDifference / 2) ** 2 +
     Math.cos(firstLatitude) * Math.cos(secondLatitude) * Math.sin(longitudeDifference / 2) ** 2;
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function boundingBoxRadiusM(candidate) {
+  const values = Array.isArray(candidate?.boundingbox) ? candidate.boundingbox.map(Number) : [];
+  if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) return 0;
+  const [south, north, west, east] = values;
+  if (
+    south < -90 || north > 90 || west < -180 || east > 180 ||
+    south > north || west > east
+  ) {
+    return 0;
+  }
+
+  const center = { latitude: Number(candidate.lat), longitude: Number(candidate.lon) };
+  if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return 0;
+  const corners = [
+    { latitude: south, longitude: west },
+    { latitude: south, longitude: east },
+    { latitude: north, longitude: west },
+    { latitude: north, longitude: east },
+  ];
+  return Math.ceil(Math.max(...corners.map((corner) => distanceBetweenCoordinatesKm(center, corner))) * 1000);
 }
 
 function matchesCity(expected, details) {
@@ -370,9 +396,12 @@ async function lookupPostalCoordinates(address, signal) {
   return result;
 }
 
-function chooseApproximateCoordinates(nominatimResult, postalResult) {
-  if (nominatimResult && postalResult) {
-    const differenceKm = distanceBetweenCoordinatesKm(nominatimResult, postalResult);
+function buildAddressConsensus(nominatimResult, postalResult) {
+  if (!postalResult) return null;
+
+  let differenceKm = 0;
+  if (nominatimResult) {
+    differenceKm = distanceBetweenCoordinatesKm(nominatimResult, postalResult);
     if (differenceKm > GEOCODING_AGREEMENT_TOLERANCE_KM) {
       const sources = [nominatimResult, postalResult];
       logGeocoding("ambiguous", null, { precision: "ambiguous", differenceKm, sources });
@@ -382,19 +411,26 @@ function chooseApproximateCoordinates(nominatimResult, postalResult) {
         { precision: "ambiguous", sources, differenceKm },
       );
     }
-
-    const result = {
-      ...postalResult,
-      agreementDistanceKm: differenceKm,
-      alternatives: [nominatimResult, postalResult],
-    };
-    logGeocoding("awesomeapi_cep", result, { agreementDistanceKm: differenceKm });
-    return result;
   }
 
-  const result = postalResult || nominatimResult;
-  if (result) logGeocoding(result.source, result);
-  return result || null;
+  const uncertainty = Math.ceil(Math.max(
+    MIN_ADDRESS_UNCERTAINTY_M,
+    Number(nominatimResult?.boundingBoxRadiusM) || 0,
+    differenceKm * 1000,
+  ));
+  const result = {
+    ...postalResult,
+    precision: "consensus",
+    source: "address_consensus",
+    uncertainty,
+    agreementDistanceKm: nominatimResult ? differenceKm : null,
+    alternatives: nominatimResult ? [nominatimResult, postalResult] : [postalResult],
+  };
+  logGeocoding("address_consensus", result, {
+    agreementDistanceKm: result.agreementDistanceKm,
+    uncertaintyM: uncertainty,
+  });
+  return result;
 }
 
 export function postalCodeDigits(value) {
@@ -549,8 +585,8 @@ export async function geocodeDeliveryAddress(address, { signal } = {}) {
     postalServiceUnavailableError = error;
   }
 
-  const approximateResult = chooseApproximateCoordinates(nominatimApproximateResult, postalResult);
-  if (approximateResult) return approximateResult;
+  const consensusResult = buildAddressConsensus(nominatimApproximateResult, postalResult);
+  if (consensusResult) return consensusResult;
 
   if (nominatimUnavailableError || postalServiceUnavailableError) {
     throw addressError(
