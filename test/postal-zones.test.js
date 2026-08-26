@@ -192,7 +192,7 @@ test("alterar endereço invalida regra e taxa anteriores", async () => {
   assert.match(setter, /setAddressValidationStatus\(\{ type: "idle", message: "" \}\)/);
 });
 
-test("checkout sem exceção exact continua no geocoder e não oferece GPS, PIN ou mapa", async () => {
+test("checkout manual sem exceção exact continua no geocoder e GPS permanece em fluxo separado", async () => {
   const { app } = await sources();
   const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
   assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
@@ -200,7 +200,9 @@ test("checkout sem exceção exact continua no geocoder e não oferece GPS, PIN 
   assert.ok(validation.indexOf("resolveDeliveryArea") < validation.indexOf("locateDeliveryAddress"));
   assert.match(validation, /type: "unavailable"/);
   assert.match(app, /Este endereço ainda não está disponível para entrega\./);
-  assert.doesNotMatch(app, /requestDeviceGps|MapLocationPicker|Você está no endereço de entrega agora|Sim, usar minha localização/);
+  assert.doesNotMatch(app, /MapLocationPicker|Você está no endereço de entrega agora|Sim, usar minha localização/);
+  assert.match(app, /requestDeviceGps\(\{ confirmed: true \}\)/);
+  assert.match(app, /locationFlow === "address"/);
 });
 
 test("checkout e WhatsApp ocultam a regra e suportam distância nula", async () => {

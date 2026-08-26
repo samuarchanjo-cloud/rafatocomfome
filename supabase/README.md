@@ -78,6 +78,21 @@ A migration relevante é `migrations/20260827_route_distance_and_uber_delivery.s
 
 Se `20260827` já foi aplicada, execute também `migrations/20260828_fix_operational_delivery_fees.sql`. Ela corrige a faixa antiga preservada para R$ 5,00 entre 1,00 km e 3,50 km e mantém R$ 3,00 somente até 1,00 km.
 
+## Cadastro opcional, GPS e histórico
+
+Depois das migrations anteriores, aplique `migrations/20260829_customer_checkout.sql`. Ela cria `customer_profiles` e `customer_addresses`, adiciona as referências opcionais do cliente e o snapshot estruturado do endereço em `orders`, além da RPC privada `place_order_v4`. Pedidos antigos e os RPCs anteriores são preservados.
+
+Depois da migration, faça um novo deploy da função:
+
+```bash
+supabase db push
+supabase functions deploy delivery-routing
+```
+
+No Dashboard do Supabase, abra **Authentication → Providers → Email** e desative **Confirm email**. Sem essa alteração, o pedido continua podendo ser feito como visitante, mas a nova conta só ganhará sessão depois da confirmação por e-mail e o primeiro endereço não poderá ser associado imediatamente.
+
+O checkout pergunta explicitamente se a pessoa está no local antes de solicitar `navigator.geolocation`. GPS com precisão pior que 150 metros cai para o fluxo manual. A geocodificação reversa só preenche o formulário: as coordenadas do GPS continuam sendo a fonte usada no cálculo. A função `delivery-routing` recalcula a rota e chama `place_order_v4`; a identidade do cliente vem do JWT validado no servidor, nunca de `customer_id` enviado pelo navegador.
+
 As regras operacionais são configuradas no Admin: até 1,00 km usa a taxa curta; acima de 1,00 km até o limite usa a taxa normal; acima do limite, o checkout oferece Uber Entrega sem adicionar frete ao pedido.
 
 ## Teste manual recomendado

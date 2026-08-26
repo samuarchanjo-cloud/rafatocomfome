@@ -92,6 +92,16 @@ export async function signIn(email, password) {
   return data.session;
 }
 
+export async function signUpCustomer({ email, password, name, phone }) {
+  const { data, error } = await supabase.auth.signUp({
+    email: String(email || "").trim(),
+    password,
+    options: { data: { name: String(name || "").trim(), phone: String(phone || "").trim() } },
+  });
+  if (error) throw error;
+  return data;
+}
+
 export async function signOut() {
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
@@ -101,6 +111,69 @@ export async function checkIsAdmin() {
   const { data, error } = await supabase.rpc("is_admin");
   if (error) throw error;
   return data === true;
+}
+
+export async function loadCustomerAccount() {
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  if (userError || !userData.user) throw userError || new Error("AUTH_REQUIRED");
+  const userId = userData.user.id;
+  const [profileResult, addressesResult, ordersResult] = await Promise.all([
+    supabase.from("customer_profiles").select("*").eq("id", userId).maybeSingle(),
+    supabase.from("customer_addresses").select("*").eq("customer_id", userId).order("is_default", { ascending: false }).order("created_at"),
+    supabase.from("orders").select("*, order_items(*)").eq("customer_id", userId).order("created_at", { ascending: false }).limit(50),
+  ]);
+  for (const result of [profileResult, addressesResult, ordersResult]) {
+    if (result.error && !isMissingTable(result.error)) throw result.error;
+  }
+  return {
+    profile: profileResult.data || null,
+    addresses: addressesResult.data || [],
+    orders: ordersResult.data || [],
+    setupRequired: [profileResult, addressesResult].some((result) => isMissingTable(result.error)),
+  };
+}
+
+export async function saveCustomerProfile(profile) {
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  if (userError || !userData.user) throw userError || new Error("AUTH_REQUIRED");
+  const payload = {
+    id: userData.user.id,
+    name: String(profile.name || "").trim(),
+    phone: String(profile.phone || "").trim(),
+    email: String(profile.email || userData.user.email || "").trim().toLowerCase(),
+  };
+  const { data, error } = await supabase.from("customer_profiles").upsert(payload, { onConflict: "id" }).select("*").single();
+  if (error) throw error;
+  return data;
+}
+
+export async function saveCustomerAddress(address) {
+  const payload = {
+    ...(address.id ? { id: address.id } : {}),
+    label: String(address.label || "Casa").trim(),
+    street: String(address.street || "").trim(),
+    number: String(address.number || "").trim(),
+    complement: String(address.complement || "").trim() || null,
+    reference: String(address.reference || "").trim() || null,
+    neighborhood: String(address.neighborhood || "").trim() || null,
+    city: String(address.city || "").trim() || null,
+    state: String(address.state || "").trim() || null,
+    postcode: postalCodeDigits(address.postcode || address.postalCode) || null,
+    latitude: address.latitude == null ? null : Number(address.latitude),
+    longitude: address.longitude == null ? null : Number(address.longitude),
+    location_source: address.location_source || address.locationSource || "address",
+    location_accuracy: address.location_accuracy == null ? (address.accuracy == null ? null : Number(address.accuracy)) : Number(address.location_accuracy),
+    geocoding_source: address.geocoding_source || address.geocodingSource || null,
+    is_default: address.is_default !== false,
+  };
+  const { data, error } = await supabase.from("customer_addresses").upsert(payload).select("*").single();
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteCustomerAddress(addressId) {
+  const { error } = await supabase.from("customer_addresses").delete().eq("id", addressId);
+  if (error) throw error;
 }
 
 export async function loadAdminOrders() {

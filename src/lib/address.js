@@ -325,12 +325,41 @@ export function validateDeliveryAddressFields(address) {
 export function composeDeliveryAddress(address) {
   const postalCode = formatPostalCode(address.postalCode);
   return [
-    `${address.street.trim()}, ${address.number.trim()}`,
+    [address.street?.trim(), address.number?.trim()].filter(Boolean).join(", "),
     address.complement?.trim(),
-    address.neighborhood.trim(),
-    `${address.city.trim()} - ${address.state.trim().toUpperCase()}`,
-    `CEP ${postalCode}`,
+    address.neighborhood?.trim(),
+    [address.city?.trim(), address.state?.trim()?.toUpperCase()].filter(Boolean).join(" - "),
+    postalCode ? `CEP ${postalCode}` : "",
   ].filter(Boolean).join(", ");
+}
+
+/** Reverse geocoding is only used to prefill the form. The supplied GPS coordinate remains authoritative. */
+export async function reverseGeocodeCoordinates({ latitude, longitude }, { signal } = {}) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    throw addressError("GPS_INVALID_COORDINATES", "O aparelho retornou uma localização inválida.");
+  }
+  const parameters = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lon),
+    format: "jsonv2",
+    addressdetails: "1",
+    zoom: "18",
+    "accept-language": "pt-BR",
+  });
+  const result = await requestNominatimCandidates(parameters, signal);
+  const row = Array.isArray(result) ? result[0] : result;
+  const address = row?.address || {};
+  return {
+    street: address.road || address.pedestrian || address.residential || address.footway || "",
+    neighborhood: address.suburb || address.neighbourhood || address.quarter || "",
+    city: address.city || address.town || address.village || address.municipality || "",
+    state: address.state_code?.replace(/^BR-/i, "") || address.state || "",
+    postalCode: formatPostalCode(address.postcode || ""),
+    displayName: row?.display_name || "",
+    geocodingSource: "nominatim_reverse",
+  };
 }
 
 /** @param {string} value @param {{ signal?: AbortSignal }} [options] */
