@@ -7,7 +7,7 @@ export const DEVICE_GPS_OPTIONS = Object.freeze({
   maximumAge: 0,
 });
 
-const TRUSTED_LOCATION_SOURCES = new Set(["nominatim_exact", "nominatim_street", "google_exact", "device_gps", "map_pin"]);
+const TRUSTED_LOCATION_SOURCES = new Set(["nominatim_exact", "nominatim_street", "google_exact", "gps", "device_gps", "map_pin"]);
 
 function locationError(code, message) {
   return Object.assign(new Error(message), { code });
@@ -96,7 +96,9 @@ export function createDeviceGpsLocation(coords, { confirmed = false } = {}) {
     longitude,
     accuracy,
     precision: "exact",
-    source: "device_gps",
+    source: "gps",
+    locationSource: "gps",
+    geocodingSource: null,
   };
 }
 

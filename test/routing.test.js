@@ -169,7 +169,8 @@ test("postal_zone e retirada não chamam roteamento; RPC privado recalcula valor
   ]);
   const placeBranch = edge.slice(edge.indexOf('if (body?.action === "place_order")'));
 
-  assert.match(placeBranch, /delivery_type === "entrega" && order\.location_source !== "postal_zone"[\s\S]*calculateServerRoute/);
+  assert.match(placeBranch, /delivery_type === "entrega" && order\.geocoding_source !== "postal_zone"[\s\S]*calculateServerRoute/);
+  assert.match(placeBranch, /admin\.rpc\("place_order_v4"/);
   assert.match(migration, /if v_location_source = 'postal_zone' then[\s\S]*v_distance := null;[\s\S]*v_delivery_fee := v_delivery_area\.delivery_fee/i);
   assert.match(migration, /v_delivery_type = 'entrega'/i);
   assert.match(migration, /v_delivery_type = 'retirada'|else[\s\S]*v_delivery_mode := null/i);
@@ -186,8 +187,8 @@ test("postal_zone e retirada não chamam roteamento; RPC privado recalcula valor
 test("checkout mostra rota e Uber sem alterar Pix, retirada ou fontes de endereço", async () => {
   const [app, admin] = await Promise.all([readFile(appUrl, "utf8"), readFile(adminUrl, "utf8")]);
   assert.match(app, /Distância da rota/);
-  assert.match(app, /Solicitar Uber Entrega/);
-  assert.match(app, /Frete do Uber pago separadamente pelo cliente/);
+  assert.match(app, /Quero retirar por Uber/);
+  assert.match(app, /Uber pago separadamente pelo cliente/);
   assert.match(app, /delivery_mode:/);
   assert.match(app, /checkout\.payment === "pix"/);
   assert.match(app, /deliveryType === "retirada"/);

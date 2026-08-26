@@ -15,7 +15,7 @@ function response(body, status = 200) {
 function validLocation(location) {
   const latitude = Number(location?.latitude);
   const longitude = Number(location?.longitude);
-  return ["nominatim_exact", "nominatim_street"].includes(location?.source)
+  return ["gps", "address", "nominatim_exact", "nominatim_street"].includes(location?.source)
     && Number.isFinite(latitude) && latitude >= -90 && latitude <= 90
     && Number.isFinite(longitude) && longitude >= -180 && longitude <= 180;
 }
@@ -54,11 +54,22 @@ Deno.serve(async (request) => {
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    if (!supabaseUrl || !serviceRoleKey) throw new Error("SERVER_NOT_CONFIGURED");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    if (!supabaseUrl || !serviceRoleKey || !anonKey) throw new Error("SERVER_NOT_CONFIGURED");
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
     const body = await request.json();
+    const bearer = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") || "";
+    let actorUserId = null;
+    if (bearer && bearer !== anonKey) {
+      const authClient = createClient(supabaseUrl, anonKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+        global: { headers: { Authorization: `Bearer ${bearer}` } },
+      });
+      const { data: userData, error: userError } = await authClient.auth.getUser(bearer);
+      if (!userError) actorUserId = userData.user?.id || null;
+    }
 
     if (body?.action === "quote") {
       const { settings, ranges } = await loadDeliveryConfiguration(admin);
@@ -75,7 +86,7 @@ Deno.serve(async (request) => {
     if (body?.action === "place_order") {
       const order = body.order || {};
       let route = null;
-      if (order.delivery_type === "entrega" && order.location_source !== "postal_zone") {
+      if (order.delivery_type === "entrega" && order.geocoding_source !== "postal_zone") {
         const { settings } = await loadDeliveryConfiguration(admin);
         route = await calculateServerRoute({
           latitude: order.latitude,
@@ -83,13 +94,14 @@ Deno.serve(async (request) => {
           source: order.location_source,
         }, settings);
       }
-      const { data, error } = await admin.rpc("place_order_v3", {
+      const { data, error } = await admin.rpc("place_order_v4", {
         p_order: order,
         p_route: route ? {
           distance_km: route.distanceKm,
           duration_minutes: route.durationMinutes,
           source: route.source,
         } : {},
+        p_actor_user_id: actorUserId,
       });
       if (error) throw error;
       return response(data);
@@ -104,6 +116,7 @@ Deno.serve(async (request) => {
       "DELIVERY_NOT_CONFIGURED", "BELOW_ONE_KM_BLOCKED", "DELIVERY_ZONE_NOT_FOUND",
       "STORE_CLOSED", "EMPTY_ORDER", "INVALID_CUSTOMER", "INVALID_ADDRESS",
       "INVALID_PAYMENT", "INVALID_DELIVERY_TYPE", "PRODUCT_UNAVAILABLE",
+      "INVALID_LOCATION_ACCURACY", "CUSTOMER_ADDRESS_FORBIDDEN", "CUSTOMER_REQUIRED",
     ]);
     console.error("delivery-routing:", code);
     return response({ error: code, message: code }, clientErrors.has(code) ? 400 : 500);

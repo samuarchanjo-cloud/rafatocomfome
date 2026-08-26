@@ -119,13 +119,16 @@ test("CEPs de regressão podem usar confirmação por PIN na região encontrada"
   }
 });
 
-test("checkout não carrega mapa ou GPS e preserva pagamentos e Pix", async () => {
+test("checkout usa GPS somente após confirmação explícita e preserva pagamentos e Pix", async () => {
   const [app, mapPicker, styles] = await Promise.all([
     readFile(new URL("../src/App.jsx", import.meta.url), "utf8"),
     readFile(new URL("../src/components/MapLocationPicker.jsx", import.meta.url), "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
   ]);
-  assert.doesNotMatch(app, /MapLocationPicker|requestDeviceGps|Você está no endereço de entrega agora/);
+  assert.doesNotMatch(app, /MapLocationPicker/);
+  assert.match(app, /requestDeviceGps\(\{ confirmed: true \}\)/);
+  assert.match(app, /Você está no local da entrega\?/);
+  assert.match(app, /Não, estou em outro lugar/);
   assert.match(mapPicker, /Confirmar este local/);
   assert.match(mapPicker, /Voltar e revisar endereço/);
   assert.match(mapPicker, /Usar minha localização atual/);
