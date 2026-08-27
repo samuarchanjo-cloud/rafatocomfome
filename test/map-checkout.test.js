@@ -134,7 +134,7 @@ test("checkout usa GPS somente após confirmação explícita e preserva pagamen
   assert.match(mapPicker, /Usar minha localização atual/);
   for (const payment of ["pix", "dinheiro", "credito", "debito"]) assert.match(app, new RegExp(`checkout\\.payment === "${payment}"`));
   assert.match(app, /navigator\.clipboard\.writeText\(store\.settings\.pix_key\)/);
-  assert.match(app, /setPixCopyStatus\("Chave Pix copiada"\)/);
+  assert.match(app, /setPixCopyStatus\("Chave copiada ✓"\)/);
   assert.match(app, /showQrCode && <div className="pix-qr-frame">/);
   assert.match(app, /onError=\{\(\) => setShowQrCode\(false\)\}/);
   assert.match(styles, /width: clamp\(160px, 48vw, 190px\)/);

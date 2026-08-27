@@ -159,6 +159,7 @@ function App() {
   const [addressValidationStatus, setAddressValidationStatus] = useState({ type: "idle", message: "" });
   const [validatingAddress, setValidatingAddress] = useState(false);
   const [pixCopyStatus, setPixCopyStatus] = useState("");
+  const [cartAttentionActive, setCartAttentionActive] = useState(false);
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
@@ -315,6 +316,26 @@ function App() {
     [cart, visibleProducts],
   );
   const cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
+
+  useEffect(() => {
+    let attentionTimeout;
+    if (cartCount <= 0) {
+      setCartAttentionActive(false);
+      return undefined;
+    }
+
+    const attentionInterval = window.setInterval(() => {
+      setCartAttentionActive(true);
+      window.clearTimeout(attentionTimeout);
+      attentionTimeout = window.setTimeout(() => setCartAttentionActive(false), 680);
+    }, 3000);
+
+    return () => {
+      window.clearInterval(attentionInterval);
+      window.clearTimeout(attentionTimeout);
+    };
+  }, [cartCount]);
+
   const subtotal = cartLines.reduce((sum, item) => sum + item.lineTotal, 0);
   const deliveryAssessment = evaluateOrderDelivery(
     checkout.deliveryType,
@@ -593,7 +614,7 @@ function App() {
   async function copyPixKey() {
     try {
       await navigator.clipboard.writeText(store.settings.pix_key);
-      setPixCopyStatus("Chave Pix copiada");
+      setPixCopyStatus("Chave copiada ✓");
     } catch {
       setPixCopyStatus("Não foi possível copiar. Toque e segure na chave.");
     }
@@ -812,7 +833,7 @@ function App() {
         <button className="brand-button" onClick={() => setView("home")} aria-label="Início"><img src={store.settings.brand_logo_url} alt={store.settings.store_name} /></button>
         <div className="store-chip"><span className={status.open ? "pulse open" : "pulse"} /><div><strong>{status.label}</strong><small>{status.detail}</small></div></div>
         <button className="account-button" onClick={() => setView("account")} aria-label="Minha conta"><UserRound size={21} />{session && <span className="session-dot" />}</button>
-        <button className="cart-button" onClick={() => setView("cart")} aria-label="Abrir carrinho"><ShoppingCart size={22} />{cartCount > 0 && <span>{cartCount}</span>}</button>
+        <button className={`cart-button${cartCount > 0 && cartAttentionActive ? " cart-attention" : ""}`} onClick={() => setView("cart")} aria-label={cartCount > 0 ? `Abrir carrinho, ${cartCount} item(ns)` : "Abrir carrinho"}><ShoppingCart size={22} />{cartCount > 0 && <span>{cartCount}</span>}</button>
       </header>
 
       <main>
@@ -924,12 +945,19 @@ function PixPaymentCard({ settings, copyStatus, onCopy }) {
   const [showQrCode, setShowQrCode] = useState(Boolean(qrCode));
   useEffect(() => setShowQrCode(Boolean(qrCode)), [qrCode]);
   return <section className="pix-box" aria-labelledby="pix-title">
-    <h2 id="pix-title">Pix</h2>
-    {showQrCode && <div className="pix-qr-frame"><img className="pix-qr" src={qrCode} alt="QR Code Pix" onError={() => setShowQrCode(false)} /></div>}
-    <div className="pix-details"><span>Favorecido</span><strong>{settings.pix_name}</strong><span>Chave Pix</span><code>{settings.pix_key}</code></div>
-    <button type="button" className="copy-pix-button" onClick={onCopy}>Copiar chave Pix</button>
-    {copyStatus && <span className="pix-copy-status" role="status">{copyStatus}</span>}
-    <small>Envie o pedido antes de realizar o pagamento. Depois, encaminhe o comprovante pelo WhatsApp.</small>
+    <div className="pix-guide-heading"><span>Pagamento via Pix</span><h2 id="pix-title">Como pagar com Pix</h2></div>
+    <p className="pix-main-message">Primeiro envie o pedido. Depois realize o pagamento.</p>
+    <ol className="pix-steps">
+      <li className="pix-step pix-copy-step"><span className="pix-step-number">1</span><div><strong>Copie a chave Pix</strong><p>A chave atual está logo abaixo. Você também poderá usar o QR Code.</p></div>
+        {showQrCode && <div className="pix-qr-frame"><img className="pix-qr" src={qrCode} alt="QR Code Pix" onError={() => setShowQrCode(false)} /></div>}
+        <div className="pix-details"><span>Favorecido</span><strong>{settings.pix_name}</strong><span>Chave Pix</span><code>{settings.pix_key}</code></div>
+        <button type="button" className="copy-pix-button" onClick={onCopy}>Copiar chave Pix</button>
+        {copyStatus && <span className="pix-copy-status" role="status" aria-live="polite">{copyStatus}</span>}
+      </li>
+      <li className="pix-step"><span className="pix-step-number">2</span><div><strong>Envie seu pedido para o WhatsApp</strong><p>Primeiro envie seu pedido para que possamos recebê-lo e confirmar as informações.</p></div></li>
+      <li className="pix-step"><span className="pix-step-number">3</span><div><strong>Realize o pagamento</strong><p>Depois de enviar o pedido, abra o aplicativo do seu banco e faça o pagamento usando a chave Pix ou o QR Code disponível.</p></div></li>
+      <li className="pix-step"><span className="pix-step-number">4</span><div><strong>Envie o comprovante</strong><p>Depois do pagamento, envie o comprovante na mesma conversa do WhatsApp.</p></div></li>
+    </ol>
   </section>;
 }
 
