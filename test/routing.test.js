@@ -11,8 +11,8 @@ import {
   requestOpenRouteService,
 } from "../supabase/functions/_shared/routing.js";
 
-const STORE = { latitude: -22.9438007, longitude: -43.5824387 };
-const CUSTOMER = { latitude: -22.928, longitude: -43.5824387 };
+const STORE = { latitude: -48.9438007, longitude: -119.5824387 };
+const CUSTOMER = { latitude: -48.928, longitude: -119.5824387 };
 const SETTINGS = {
   maximum_delivery_distance_km: 3.5,
   below_one_km_behavior: "fixed",
@@ -144,6 +144,7 @@ test("Haversine de 1,8 km não prevalece sobre rota de 4,1 km", async () => {
 test("cliente usa somente a Edge Function para cotar e salvar pedido", async () => {
   const calls = [];
   const client = {
+    auth: { getSession: async () => ({ data: { session: null } }) },
     functions: {
       async invoke(name, options) {
         calls.push({ name, body: options.body });

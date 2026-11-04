@@ -29,6 +29,8 @@ export function isTrustedDeliveryLocation(location) {
     );
   }
 
+  if (location.latitude == null || location.longitude == null
+    || String(location.latitude).trim() === "" || String(location.longitude).trim() === "") return false;
   const latitude = Number(location.latitude);
   const longitude = Number(location.longitude);
   if (

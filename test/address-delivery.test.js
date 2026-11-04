@@ -15,26 +15,26 @@ import {
 } from "../src/lib/location.js";
 
 const CABUCU = {
-  postalCode: "23036-060", street: "Estrada Cabuçu de Baixo", number: "388",
-  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+  postalCode: "00000-060", street: "Estrada Alfa Ficticia", number: "388",
+  neighborhood: "Bairro Alfa", city: "Cidade Ficticia", state: "RJ",
 };
 const GIORDANO = {
-  postalCode: "23036-050", street: "Rua Giordano Vincenzo", number: "515",
-  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+  postalCode: "00000-050", street: "Rua Beta Ficticia", number: "515",
+  neighborhood: "Bairro Alfa", city: "Cidade Ficticia", state: "RJ",
 };
 const LOLITA = {
-  postalCode: "23036-061", street: "Rua Lolita Rodrigues", number: "285",
-  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+  postalCode: "00000-061", street: "Rua Gama Ficticia", number: "285",
+  neighborhood: "Bairro Alfa", city: "Cidade Ficticia", state: "RJ",
 };
 const WALDIR = {
-  postalCode: "23036-076", street: "Rua Waldir José de Melo", number: "71",
-  neighborhood: "Guaratiba", city: "Rio de Janeiro", state: "RJ",
+  postalCode: "00000-076", street: "Rua Delta Ficticia", number: "71",
+  neighborhood: "Bairro Alfa", city: "Cidade Ficticia", state: "RJ",
 };
 const NORMAL_155 = {
-  postalCode: "23036-155", street: "Rua Alfredo Britto", number: "80",
-  neighborhood: "Campo Grande", city: "Rio de Janeiro", state: "RJ",
+  postalCode: "00000-155", street: "Rua Epsilon Ficticia", number: "80",
+  neighborhood: "Bairro Beta", city: "Cidade Ficticia", state: "RJ",
 };
-const STORE = { latitude: -22.943800658459434, longitude: -43.582438704219854 };
+const STORE = { latitude: -48.943800658459434, longitude: -119.582438704219854 };
 const SETTINGS = { maximum_delivery_distance_km: 3.5, below_one_km_behavior: "fixed", below_one_km_fee: 3 };
 const RANGES = [{ min_distance_km: 1, max_distance_km: 3.5, fee: 5, active: true }];
 
@@ -54,13 +54,13 @@ function viaCep(address) {
 
 function nominatimCandidate({
   address = CABUCU,
-  latitude = -22.944,
-  longitude = -43.582,
+  latitude = -48.944,
+  longitude = -119.582,
   houseNumber = address.number,
   postalCode = address.postalCode,
   road = address.street,
   city = address.city,
-  state = "Rio de Janeiro",
+  state = "Cidade Ficticia",
   stateIso = state === "São Paulo" ? "BR-SP" : "BR-RJ",
   type = houseNumber ? "house" : "residential",
   addresstype = houseNumber ? "house" : "road",
@@ -142,7 +142,7 @@ test("baseline restaurada consulta uma vez o endereço completo e aceita número
   const nominatimCalls = calls.filter((value) => new URL(value).hostname === "nominatim.openstreetmap.org");
   assert.equal(nominatimCalls.length, 1);
   const url = new URL(nominatimCalls[0]);
-  assert.match(url.searchParams.get("q"), /Rua Giordano Vincenzo, 515, Guaratiba, Rio de Janeiro - RJ, 23036-050, Brasil/);
+  assert.match(url.searchParams.get("q"), /Rua Beta Ficticia, 515, Bairro Alfa, Cidade Ficticia - RJ, 00000-050, Brasil/);
   assert.equal(url.searchParams.get("countrycodes"), "br");
   assert.equal(url.searchParams.has("street"), false);
   assert.equal(url.searchParams.has("viewbox"), false);
@@ -220,7 +220,7 @@ test("fallback aceita um único candidato correto próximo e rejeita candidato �
   );
 });
 
-test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", async () => {
+test("CEP 00000-155 sem exceção usa fallback de rua e calcula Haversine", async () => {
   const latitude = STORE.latitude + (2 / 111.195);
   const calls = installFetchMock({
     address: NORMAL_155,
@@ -229,17 +229,17 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
       : [nominatimCandidate({
         address: NORMAL_155,
         houseNumber: null,
-        postalCode: "23036-053",
+        postalCode: "00000-053",
         latitude,
         longitude: STORE.longitude,
       })],
   });
-  const { geocodeDeliveryAddress } = await loadAddressModule("normal-23036-155");
+  const { geocodeDeliveryAddress } = await loadAddressModule("normal-00000-155");
   const location = await geocodeDeliveryAddress(NORMAL_155);
   const { centerKm, assessment } = assessLocation(location);
 
   assert.equal(location.source, "nominatim_street");
-  assert.equal(location.postalCode, "23036-155");
+  assert.equal(location.postalCode, "00000-155");
   assert.ok(centerKm > 1.99 && centerKm < 2.01);
   assert.equal(assessment.allowed, true);
   assert.equal(assessment.fee, 5);
@@ -247,8 +247,8 @@ test("CEP 23036-155 sem exceção usa fallback de rua e calcula Haversine", asyn
   assert.equal(nominatimCalls.length, 2);
   const streetQuery = new URL(nominatimCalls[1]).searchParams.get("q");
   assert.doesNotMatch(streetQuery, /, 80,/);
-  assert.doesNotMatch(streetQuery, /23036-155/);
-  assert.doesNotMatch(streetQuery, /Campo Grande/);
+  assert.doesNotMatch(streetQuery, /00000-155/);
+  assert.doesNotMatch(streetQuery, /Bairro Beta/);
 });
 
 test("CEP normal com fallback de rua acima de 3,5 km não usa entrega própria", async () => {
@@ -347,8 +347,8 @@ test("falha não é armazenada no cache e nova tentativa pode encontrar o númer
 
 test("fallback de rua aceita postcode divergente, mas continua exigindo correspondência geográfica", async () => {
   const cases = [
-    [LOLITA, nominatimCandidate({ address: LOLITA, houseNumber: null, postalCode: "23030-440", latitude: -22.9480261, longitude: -43.5844627 })],
-    [CABUCU, nominatimCandidate({ houseNumber: null, postalCode: "23036-053", latitude: -22.940458, longitude: -43.5799353 })],
+    [LOLITA, nominatimCandidate({ address: LOLITA, houseNumber: null, postalCode: "00001-440", latitude: -48.9480261, longitude: -119.5844627 })],
+    [CABUCU, nominatimCandidate({ houseNumber: null, postalCode: "00000-053", latitude: -48.940458, longitude: -119.5799353 })],
   ];
 
   for (const [address, candidate] of cases) {
@@ -379,7 +379,7 @@ test("provedor automático prioriza a resolução exata do Nominatim", async () 
   );
 });
 
-test("CEPs 23036-061 e 23036-076 com exceção exact validam ViaCEP e não chamam Nominatim", async () => {
+test("CEPs 00000-061 e 00000-076 com exceção exact validam ViaCEP e não chamam Nominatim", async () => {
   for (const address of [LOLITA, WALDIR]) {
     const calls = installFetchMock({ address, candidates: () => { throw new Error("Nominatim não deveria ser chamado"); } });
     const { validateDeliveryPostalAddress } = await loadAddressModule(`exact-zone-${address.postalCode}`);
@@ -401,9 +401,9 @@ test("CEPs 23036-061 e 23036-076 com exceção exact validam ViaCEP e não chama
 test("checkout valida ViaCEP, consulta exceção exact e somente depois chama o geocoder", async () => {
   const app = await readFile(new URL("../src/App.jsx", import.meta.url), "utf8");
   const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
-  assert.match(validation, /validateDeliveryPostalAddress\(checkout/);
-  assert.match(validation, /resolveDeliveryArea\(checkout\.postalCode, \{ signal:/);
-  assert.match(validation, /createPostalZoneLocation\(zone, checkout\.postalCode\)/);
+  assert.match(validation, /validateDeliveryPostalAddress\(address/);
+  assert.match(validation, /resolveDeliveryArea\(address\.postalCode, \{ signal:/);
+  assert.match(validation, /createPostalZoneLocation\(zone, address\.postalCode\)/);
   assert.ok(validation.indexOf("resolveDeliveryArea") < validation.indexOf("locateDeliveryAddress"));
   assert.match(validation, /if \(administrativeLocation\)[\s\S]*return;/);
   assert.match(validation, /type: "unavailable"/);

@@ -1,3 +1,4 @@
+import { checkoutTestMode } from "./lib/supabase";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -37,7 +38,7 @@ import { getBusinessStatus } from "./lib/businessHours";
 import { evaluateOrderDelivery } from "./lib/delivery";
 import { locateDeliveryAddress } from "./lib/geocodingProvider";
 import { isTrustedDeliveryLocation, requestDeviceGps } from "./lib/location";
-import { checkoutDraft, rebuildCartFromOrder, recommendProducts, savedAddressToCheckout } from "./lib/customer";
+import { checkoutDraft, rebuildCartFromOrder, recommendProducts, savedAddressToCheckout, invalidateEditedAddress, saveOptionalCheckoutAddress } from "./lib/customer";
 import { createPostalZoneLocation } from "./lib/postalZone";
 import {
   checkIsAdmin,
@@ -118,7 +119,14 @@ function publicProducts(products) {
 }
 
 function friendlyOrderError(error) {
-  const message = `${error?.message || ""} ${error?.details || ""}`;
+  const message = `${error?.code || ""} ${error?.message || ""} ${error?.details || ""}`;
+  if (/AUTH_REQUIRED|JWT|refresh_token|session.*expired/i.test(message)) return "Sua sessão expirou ou não pôde ser validada. Entre novamente em Minha conta e volte ao checkout. Seu carrinho foi mantido.";
+  if (/PGRST202|place_order_v4|SERVER_NOT_CONFIGURED/.test(message) || error?.status === 404) return "O serviço de pedidos está indisponível. Seu carrinho foi mantido. Entre em contato com a loja.";
+  if (message.includes("INVALID_CUSTOMER")) return "Informe um nome com pelo menos 2 caracteres e telefone com pelo menos 8 dígitos.";
+  if (message.includes("INVALID_ADDRESS")) return "Confira a rua e o número do endereço de entrega.";
+  if (message.includes("INVALID_QUANTITY")) return "Cada produto deve ter entre 1 e 50 unidades. Revise o carrinho.";
+  if (message.includes("INVALID_PAYMENT")) return "Selecione uma forma de pagamento válida.";
+  if (/ROUTING_UNAVAILABLE|Failed to fetch|FunctionsFetchError|NetworkError/i.test(message)) return "Não foi possível confirmar a resposta do serviço. Seu carrinho foi mantido. Se você já finalizou, confirme com a loja antes de enviar novamente para evitar duplicidade.";
   if (message.includes("STORE_CLOSED")) return "O estabelecimento está fechado. O pedido não foi salvo nem enviado.";
   if (message.includes("LOCATION_REQUIRED")) return "Valide o endereço de entrega antes de finalizar o pedido.";
   if (message.includes("INVALID_LOCATION_SOURCE")) return "Confirme o local de entrega antes de finalizar.";
@@ -394,12 +402,14 @@ function App() {
     const changesValidatedManualAddress = DELIVERY_ADDRESS_FIELDS.has(field) && checkout.locationFlow !== "gps";
     if (changesValidatedManualAddress || field === "deliveryType") {
       geocodingAbortRef.current?.abort();
+      setValidatingAddress(false);
       setDeliveryLocation(null);
       setAddressValidationStatus({ type: "idle", message: "" });
     }
     setCheckout((current) => {
       const next = { ...current, [field]: value };
       if (changesValidatedManualAddress || field === "deliveryType") next.deliveryMode = "own_delivery";
+      if (changesValidatedManualAddress) next.customerAddressId = null;
       if (field === "deliveryType") Object.assign(next, { locationFlow: null, customerAddressId: null });
       if (field === "locationFlow") Object.assign(next, { customerAddressId: null, deliveryMode: "own_delivery" });
       if (field === "payment" && value !== "dinheiro") Object.assign(next, { needsChange: false, changeFor: "" });
@@ -421,7 +431,9 @@ function App() {
   }
 
   async function acceptResolvedLocation(coordinates) {
+    const request = geocodingAbortRef.current;
     const { location, assessment } = await resolveDeliveryCoordinates(coordinates);
+    if (request?.signal.aborted || geocodingAbortRef.current !== request) return;
     setDeliveryLocation(location);
     setCheckout((current) => ({ ...current, deliveryMode: "own_delivery" }));
     setAddressValidationStatus({
@@ -432,6 +444,7 @@ function App() {
 
   function chooseManualAddress({ preserveFields = false } = {}) {
     geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
     setDeliveryLocation(null);
     setAddressValidationStatus({ type: "idle", message: "" });
     setCheckout((current) => ({
@@ -446,15 +459,21 @@ function App() {
   async function useDeviceLocation() {
     if (gpsLoading) return;
     geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
+    const controller = new AbortController();
+    geocodingAbortRef.current = controller;
     setGpsLoading(true);
     setDeliveryLocation(null);
     setCheckout((current) => ({ ...current, locationFlow: "gps", customerAddressId: null, deliveryMode: "own_delivery" }));
     setAddressValidationStatus({ type: "loading", message: "Obtendo a localização precisa do aparelho..." });
     try {
       const gps = await requestDeviceGps({ confirmed: true });
+      if (controller.signal.aborted) return;
       await acceptResolvedLocation({ ...gps, locationSource: "gps", geocodingSource: null });
+      if (controller.signal.aborted) return;
       try {
         const resolved = await reverseGeocodeCoordinates(gps);
+        if (controller.signal.aborted) return;
         setCheckout((current) => current.locationFlow !== "gps" ? current : ({
           ...current,
           street: resolved.street || current.street,
@@ -468,6 +487,7 @@ function App() {
         if (error.name !== "AbortError") console.warn("Reverse geocoding indisponível:", error.message);
       }
     } catch (error) {
+      if (controller.signal.aborted) return;
       setDeliveryLocation(null);
       setAddressValidationStatus({
         type: "gps-error",
@@ -481,34 +501,41 @@ function App() {
   }
 
   async function useSavedAddress(address) {
+    geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
+    const controller = new AbortController();
+    geocodingAbortRef.current = controller;
+    setDeliveryLocation(null);
     const fields = savedAddressToCheckout(address);
     setCheckout((current) => ({
       ...current, ...fields, locationFlow: "saved", customerAddressId: address.id,
       deliveryMode: "own_delivery", saveAddress: false,
     }));
-    const latitude = Number(address.latitude);
-    const longitude = Number(address.longitude);
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-      chooseManualAddress({ preserveFields: true });
-      showNotice("Este endereço salvo precisa ser validado novamente.", "info");
+    // Manual addresses (including postal exceptions) must be resolved from their
+    // current text. Coordinates can be absent or left over from an earlier edit.
+    const gps = {
+      latitude: address.latitude, longitude: address.longitude,
+      source: "gps", locationSource: "gps", precision: "exact",
+      accuracy: address.location_accuracy, geocodingSource: address.geocoding_source || null,
+    };
+    if (address.location_source !== "gps" || !isTrustedDeliveryLocation(gps)) {
+      setCheckout((current) => ({ ...current, locationFlow: validateDeliveryAddressFields(fields) ? "address" : "saved", customerAddressId: null, saveAddress: false }));
+      await validateDeliveryAddress(fields);
       return;
     }
     setAddressValidationStatus({ type: "loading", message: "Recalculando a entrega para o endereço salvo..." });
     try {
-      const source = address.location_source === "gps" ? "gps" : (address.geocoding_source || "nominatim_exact");
-      await acceptResolvedLocation({
-        latitude, longitude, source, precision: source === "nominatim_street" ? "street" : "exact",
-        accuracy: address.location_accuracy, locationSource: address.location_source || "address",
-        geocodingSource: address.geocoding_source || null,
-      });
+      await acceptResolvedLocation(gps);
     } catch (error) {
+      if (controller.signal.aborted) return;
       setDeliveryLocation(null);
-      setAddressValidationStatus({ type: "error", message: error.message });
+      setAddressValidationStatus({ type: "error", message: friendlyOrderError(error) });
     }
   }
 
   function editSavedAddress(address) {
     geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
     setDeliveryLocation(null);
     setAddressValidationStatus({ type: "idle", message: "" });
     setCheckout((current) => ({
@@ -521,26 +548,26 @@ function App() {
     }));
   }
 
-  async function validateDeliveryAddress() {
-    if (validatingAddress) return;
-    const validationMessage = validateDeliveryAddressFields(checkout);
+  async function validateDeliveryAddress(address = checkout) {
+    const validationMessage = validateDeliveryAddressFields(address);
     if (validationMessage) {
       setAddressValidationStatus({ type: "error", message: validationMessage });
       return;
     }
 
     geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
     const controller = new AbortController();
     geocodingAbortRef.current = controller;
     setDeliveryLocation(null);
     setValidatingAddress(true);
     setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
     try {
-      const postalAddress = await validateDeliveryPostalAddress(checkout, { signal: controller.signal });
+      const postalAddress = await validateDeliveryPostalAddress(address, { signal: controller.signal });
       setAddressValidationStatus({ type: "loading", message: "Verificando disponibilidade da entrega..." });
-      const zone = await resolveDeliveryArea(checkout.postalCode, { signal: controller.signal });
+      const zone = await resolveDeliveryArea(address.postalCode, { signal: controller.signal });
       if (controller.signal.aborted) return;
-      const administrativeLocation = createPostalZoneLocation(zone, checkout.postalCode);
+      const administrativeLocation = createPostalZoneLocation(zone, address.postalCode);
       if (administrativeLocation) {
         setDeliveryLocation({ ...administrativeLocation, locationSource: "address", geocodingSource: "postal_zone" });
         setAddressValidationStatus({ type: "success", message: "Entrega disponível para o endereço informado." });
@@ -549,7 +576,7 @@ function App() {
 
       setAddressValidationStatus({ type: "loading", message: "Localizando o endereço..." });
       const maximumDeliveryDistanceKm = Number(store.settings.maximum_delivery_distance_km);
-      const coordinates = await locateDeliveryAddress(checkout, {
+      const coordinates = await locateDeliveryAddress(address, {
         signal: controller.signal,
         postalAddress,
         origin: {
@@ -560,6 +587,7 @@ function App() {
           ? Math.max(maximumDeliveryDistanceKm * 2, maximumDeliveryDistanceKm + 2)
           : undefined,
       });
+      if (controller.signal.aborted) return;
       if (!isTrustedDeliveryLocation(coordinates)) {
         setAddressValidationStatus({ type: "error", message: "O endereço não pôde ser localizado com precisão." });
         return;
@@ -571,7 +599,7 @@ function App() {
         geocodingSource: coordinates.source,
       });
     } catch (error) {
-      if (error.name === "AbortError") return;
+      if (controller.signal.aborted || error.name === "AbortError") return;
       if (error.code === "ADDRESS_NOT_PRECISE") {
         setAddressValidationStatus({
           type: "unavailable",
@@ -581,7 +609,7 @@ function App() {
       }
       setAddressValidationStatus({
         type: "error",
-        message: error.message || "Não foi possível validar o endereço. Revise os dados e tente novamente.",
+        message: friendlyOrderError(error),
       });
     } finally {
       if (geocodingAbortRef.current === controller) {
@@ -593,6 +621,7 @@ function App() {
 
   function changeDeliveryLocation() {
     geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
     setDeliveryLocation(null);
     setAddressValidationStatus({ type: "idle", message: "" });
     setCheckout((current) => ({
@@ -605,6 +634,7 @@ function App() {
 
   function reviewDeliveryAddress() {
     geocodingAbortRef.current?.abort();
+    setValidatingAddress(false);
     setDeliveryLocation(null);
     setAddressValidationStatus({ type: "idle", message: "" });
     setCheckout((current) => ({ ...current, locationFlow: "address", customerAddressId: null, deliveryMode: "own_delivery" }));
@@ -612,6 +642,7 @@ function App() {
   }
 
   async function copyPixKey() {
+    if (checkoutTestMode) return;
     try {
       await navigator.clipboard.writeText(store.settings.pix_key);
       setPixCopyStatus("Chave copiada ✓");
@@ -689,6 +720,8 @@ function App() {
         password: accountPassword,
         name: checkout.name,
         phone: checkout.phone,
+      }).catch(() => {
+        throw new Error("Não foi possível criar sua conta. Entre na conta existente ou selecione Continuar sem cadastro para comprar.");
       });
       activeSession = result.session;
       if (!activeSession) {
@@ -696,23 +729,27 @@ function App() {
         return null;
       }
       setSession(activeSession);
-      await saveCustomerProfile({ name: checkout.name, phone: checkout.phone, email: checkout.accountEmail });
     }
     if (!activeSession) return null;
 
-    if (!account.profile) {
-      await saveCustomerProfile({
-        name: checkout.name,
-        phone: checkout.phone,
-        email: activeSession.user.email,
-      });
-    }
+    // v4 already creates/updates the profile transactionally with the order.
+    // A separate profile write is needed only for the optional saved address FK.
     if (checkout.deliveryType === "entrega" && (checkout.saveAddress || checkout.accountChoice === "save")) {
-      const saved = await saveCustomerAddress(customerAddressPayload());
-      setCheckout((current) => ({ ...current, customerAddressId: saved.id }));
-      return saved.id;
+      try {
+        const saved = await saveOptionalCheckoutAddress({
+          saveProfile: !account.profile
+            ? (signal) => saveCustomerProfile({ name: checkout.name, phone: checkout.phone, email: activeSession.user.email }, { signal })
+            : null,
+          saveAddress: (signal) => saveCustomerAddress(customerAddressPayload(), { signal }),
+        });
+        setCheckout((current) => ({ ...current, customerAddressId: saved.id }));
+        return saved.id;
+      } catch {
+        showNotice("Não foi possível salvar o endereço na conta. O pedido continuará com o endereço informado.", "info");
+        return null;
+      }
     }
-    return checkout.customerAddressId || null;
+    return checkout.deliveryType === "entrega" && checkout.locationFlow === "saved" ? checkout.customerAddressId || null : null;
   }
 
   async function finishOrder(event) {
@@ -725,7 +762,7 @@ function App() {
     }
     if (!cartLines.length) return showNotice("Adicione pelo menos um produto ao carrinho.", "error");
     const addressValidationMessage = checkout.deliveryType === "entrega"
-      ? checkout.locationFlow === "gps"
+      ? checkout.locationFlow === "gps" || (checkout.locationFlow === "saved" && deliveryLocation?.locationSource === "gps")
         ? (!checkout.street.trim() ? "Informe a rua do endereço de entrega." : !checkout.number.trim() ? "Informe o número do endereço de entrega." : "")
         : validateDeliveryAddressFields(checkout)
       : "";
@@ -765,19 +802,23 @@ function App() {
         location_accuracy_m: checkout.deliveryType === "entrega" ? deliveryLocation?.accuracy ?? null : null,
         location_uncertainty_m: null,
         items: cartLines.map((item) => ({ product_id: item.id, quantity: item.qty })),
-      });
+      }, { expectedUserId: session?.user?.id });
       const url = `https://wa.me/${store.settings.whatsapp_number}?text=${encodeURIComponent(buildWhatsappMessage(order))}`;
       setCart([]);
       localStorage.removeItem(CHECKOUT_STORAGE_KEY);
       setCheckout(EMPTY_CHECKOUT);
       setDeliveryLocation(null);
       setAccountPassword("");
+      if (checkoutTestMode) {
+        showNotice("Pedido fictício salvo.", "success");
+        return;
+      }
       showNotice("Pedido salvo. Abrindo o WhatsApp...", "success");
       window.location.assign(url);
     } catch (error) {
       console.error("Erro ao finalizar pedido:", error);
       showNotice(friendlyOrderError(error), "error");
-      await reloadStore().catch(() => {});
+      void reloadStore().catch(() => {});
     } finally {
       setSubmittingOrder(false);
     }
@@ -800,7 +841,7 @@ function App() {
   }
 
   async function saveAddressFromAccount(address) {
-    try { await saveCustomerAddress(address); await reloadAccount(); showNotice("Endereço salvo.", "success"); }
+    try { await saveCustomerAddress(invalidateEditedAddress(address, account.addresses.find((saved) => saved.id === address.id))); await reloadAccount(); showNotice("Endereço salvo.", "success"); }
     catch (error) { showNotice(error.message, "error"); throw error; }
   }
 
@@ -829,6 +870,7 @@ function App() {
 
   return (
     <div className={view === "admin" ? "app-shell admin-shell" : "app-shell"}>
+      {checkoutTestMode && <p role="status">HOMOLOGAÇÃO — pedidos fictícios, sem pagamento ou entrega.</p>}
       <header className="topbar">
         <button className="brand-button" onClick={() => setView("home")} aria-label="Início"><img src={store.settings.brand_logo_url} alt={store.settings.store_name} /></button>
         <div className="store-chip"><span className={status.open ? "pulse open" : "pulse"} /><div><strong>{status.label}</strong><small>{status.detail}</small></div></div>
@@ -901,6 +943,7 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
     {needsAddress && <>
       {!checkout.locationFlow && defaultAddress && <div className="checkout-section saved-checkout-address"><h2>Entregar em</h2><strong>{defaultAddress.label || "Casa"}</strong><p>{defaultAddress.street}, {defaultAddress.number}</p><small>{[defaultAddress.complement, defaultAddress.neighborhood].filter(Boolean).join(" · ")}</small><div className="saved-checkout-actions"><button type="button" onClick={() => onUseSavedAddress(defaultAddress)}>Usar este endereço</button><button type="button" onClick={() => onEditSavedAddress(defaultAddress)}>Editar</button></div></div>}
       {!checkout.locationFlow && <LocationQuestion onGps={onUseGps} onManual={onUseManual} gpsLoading={gpsLoading} hasSavedAddress={Boolean(defaultAddress)} />}
+      {checkout.locationFlow === "saved" && <div className="checkout-section"><h2>Endereço selecionado</h2><p>{composeDeliveryAddress(checkout)}</p><button type="button" onClick={reviewDeliveryAddress}>Revisar endereço</button><button type="button" onClick={changeDeliveryLocation}>Escolher outro endereço</button></div>}
       {checkout.locationFlow === "gps" && <div className="checkout-section gps-address-section"><h2>Endereço de entrega</h2>{gpsLoading && <div className="location-progress"><Navigation size={20} /><strong>Obtendo localização precisa...</strong></div>}{addressValidationStatus.type === "gps-error" && <div className="gps-fallback-panel"><strong>{addressValidationStatus.message}</strong><div><button type="button" onClick={onUseGps}>Tentar novamente</button><button type="button" onClick={() => onUseManual({ preserveFields: true })}>Usar endereço manual</button></div></div>}{deliveryLocation && <><label>Rua<input required autoComplete="address-line1" value={checkout.street} onChange={(event) => setCheckoutField("street", event.target.value)} /></label><div className="address-row"><label>Número<input id="delivery-number" required inputMode="numeric" value={checkout.number} onChange={(event) => setCheckoutField("number", event.target.value)} /></label><label>Complemento / referência<input autoComplete="address-line2" placeholder="Ex.: bloco, apartamento, casa, portão azul..." value={checkout.complement} onChange={(event) => setCheckoutField("complement", event.target.value)} /></label></div></>}</div>}
       {checkout.locationFlow === "address" && <div className="checkout-section"><h2>Endereço de entrega</h2><label>CEP<input id="delivery-postal-code" required inputMode="numeric" autoComplete="postal-code" value={checkout.postalCode} onChange={(event) => setCheckoutField("postalCode", formatPostalCode(event.target.value))} /></label>
         {postalCodeStatus.message && <small className={`address-helper ${postalCodeStatus.type}`}>{postalCodeStatus.message}</small>}
@@ -910,7 +953,7 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
         <div className="address-row"><label>Cidade<input required autoComplete="address-level2" value={checkout.city} onChange={(event) => setCheckoutField("city", event.target.value)} /></label><label>Estado<input required autoComplete="address-level1" value={checkout.state} onChange={(event) => setCheckoutField("state", event.target.value)} /></label></div>
         <label>Ponto de referência<input value={checkout.reference} onChange={(event) => setCheckoutField("reference", event.target.value)} /></label>
       </div>}
-      {checkout.locationFlow === "address" && <div className="location-tools"><button type="button" onClick={validateDeliveryAddress} disabled={validatingAddress || postalCodeStatus.type === "loading"}><MapPin size={17} />{validatingAddress ? "Localizando endereço..." : "Localizar endereço e calcular entrega"}</button></div>}
+      {checkout.locationFlow === "address" && <div className="location-tools"><button type="button" onClick={() => validateDeliveryAddress()} disabled={validatingAddress || postalCodeStatus.type === "loading"}><MapPin size={17} />{validatingAddress ? "Localizando endereço..." : "Localizar endereço e calcular entrega"}</button></div>}
       {addressValidationStatus.type === "unavailable" && <div className="gps-fallback-panel"><strong>{addressValidationStatus.message}</strong><button type="button" className="gps-review-button" onClick={reviewDeliveryAddress}>Revisar endereço</button></div>}
       {deliveryLocation && <LocationStatusCard location={deliveryLocation} assessment={deliveryAssessment} deliveryMode={checkout.deliveryMode} onSelectUber={() => setCheckoutField("deliveryMode", "uber")} onChange={changeDeliveryLocation} />}
       {session && deliveryLocation && checkout.locationFlow !== "saved" && <label className="inline-check save-current-address"><input type="checkbox" checked={checkout.saveAddress} onChange={(event) => setCheckoutField("saveAddress", event.target.checked)} />Salvar este endereço na minha conta</label>}
@@ -918,7 +961,7 @@ function CheckoutView({ cartLines, subtotal, deliveryFee, cardFee, isCardPayment
     <Recommendations products={recommendations} onOpen={onOpenRecommendation} />
     <div className="option-group"><span>Forma de pagamento</span><div className="payment-list"><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "pix"} label="Pix" onClick={() => setCheckoutField("payment", "pix")} /><PaymentButton icon={<Wallet size={18} />} active={checkout.payment === "dinheiro"} label="Dinheiro" onClick={() => setCheckoutField("payment", "dinheiro")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "credito"} label="Cartão de crédito" onClick={() => setCheckoutField("payment", "credito")} /><PaymentButton icon={<CreditCard size={18} />} active={checkout.payment === "debito"} label="Cartão de débito" onClick={() => setCheckoutField("payment", "debito")} /></div></div>
     {checkout.payment === "dinheiro" && <div className="option-group change-option"><span>Precisa de troco?</span><div className="segmented"><button type="button" className={!checkout.needsChange ? "selected" : ""} onClick={() => setCheckoutField("needsChange", false)}>Não</button><button type="button" className={checkout.needsChange ? "selected" : ""} onClick={() => setCheckoutField("needsChange", true)}>Sim</button></div>{checkout.needsChange && <label>Troco para quanto?<input inputMode="decimal" placeholder="R$ 100,00" value={checkout.changeFor} onBlur={() => setCheckoutField("changeFor", moneyFromInput(checkout.changeFor))} onChange={(event) => setCheckoutField("changeFor", event.target.value)} /></label>}</div>}
-    {checkout.payment === "pix" && <PixPaymentCard settings={settings} copyStatus={pixCopyStatus} onCopy={copyPixKey} />}
+    {!checkoutTestMode && checkout.payment === "pix" && <PixPaymentCard settings={settings} copyStatus={pixCopyStatus} onCopy={copyPixKey} />}
     <label>Observação do pedido<textarea value={checkout.notes} onChange={(event) => setCheckoutField("notes", event.target.value)} /></label><div className="mini-order"><strong>{cartLines.length} item(ns) no pedido</strong><Totals subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} deliveryType={checkout.deliveryType} deliveryMode={checkout.deliveryMode} deliveryDistance={deliveryLocation} /></div>
     {!session && <div className="checkout-section optional-account"><h2>Quer salvar seus dados para pedir mais rápido da próxima vez?</h2><p>Crie sua conta e deixe seus dados e endereço salvos para os próximos pedidos.</p><div className="segmented"><button type="button" className={checkout.accountChoice === "save" ? "selected" : ""} onClick={() => setCheckoutField("accountChoice", "save")}>Salvar meus dados</button><button type="button" className={checkout.accountChoice !== "save" ? "selected" : ""} onClick={() => { setCheckoutField("accountChoice", "guest"); setAccountPassword(""); }}>Continuar sem cadastro</button></div>{checkout.accountChoice === "save" && <div className="quick-account-fields"><label>E-mail<input required type="email" autoComplete="email" value={checkout.accountEmail} onChange={(event) => setCheckoutField("accountEmail", event.target.value)} /></label><label>Senha<input required minLength={6} type="password" autoComplete="new-password" value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} /></label><small>Nome e telefone acima serão usados no seu perfil.</small></div>}</div>}
     {session && <div className="account-connected"><CheckCircle2 size={18} /><span>Pedido vinculado à sua conta ({session.user.email}).</span></div>}

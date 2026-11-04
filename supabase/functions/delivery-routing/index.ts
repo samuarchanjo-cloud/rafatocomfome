@@ -68,7 +68,10 @@ Deno.serve(async (request) => {
         global: { headers: { Authorization: `Bearer ${bearer}` } },
       });
       const { data: userData, error: userError } = await authClient.auth.getUser(bearer);
-      if (!userError) actorUserId = userData.user?.id || null;
+      if (userError || !userData.user) {
+        return response({ error: "AUTH_REQUIRED", message: "Não foi possível validar sua sessão. Entre novamente na conta." }, 401);
+      }
+      actorUserId = userData.user.id;
     }
 
     if (body?.action === "quote") {
