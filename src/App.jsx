@@ -175,6 +175,16 @@ function App() {
   const submittingRef = useRef(false);
   const [attempt, setAttempt] = useState(() => readCheckoutAttempt(sessionStorage));
   const [receipt, setReceipt] = useState(null);
+  const [receiptNotice, setReceiptNotice] = useState("");
+  const receiptDialog = useRef(null);
+  const visibleReceipt = !authLoading && receipt
+    && (receipt.customer_id ?? null) === (session?.user?.id ?? null) ? receipt : null;
+
+  useEffect(() => {
+    if (!visibleReceipt) return;
+    setReceiptNotice("");
+    if (receiptDialog.current && !receiptDialog.current.open) receiptDialog.current.showModal();
+  }, [visibleReceipt]);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [account, setAccount] = useState({ profile: null, addresses: [], orders: [], setupRequired: false });
@@ -922,22 +932,25 @@ function App() {
         <p role="status">Volte à sessão que iniciou o pedido para verificar a tentativa pendente.</p>}
       {!authLoading && !receipt && attempt && (session?.user?.id ?? null) === attempt.actorId &&
         <button type="button" disabled={submittingOrder} onClick={resumeAttempt}>{attempt.payload ? "Verificar ou retomar pedido" : "Recuperar confirmação do pedido"}</button>}
-      {!authLoading && receipt && (receipt.customer_id ?? null) === (session?.user?.id ?? null) &&
-        <section className="account-card" aria-label="Confirmação do pedido">
-          <h2>Pedido registrado #{String(receipt.id).slice(0, 8)}</h2>
+      {visibleReceipt &&
+        <dialog ref={receiptDialog} className="account-card receipt-dialog" aria-labelledby="receipt-title" onClose={closeReceipt}>
+          <h2 id="receipt-title">Pedido registrado #{String(receipt.id).slice(0, 8)}</h2>
           <p>Total: {money(receipt.total)}. O envio da mensagem ainda depende de você.</p>
+          <div className="saved-address-actions">
           {!checkoutTestMode && <a href={`https://wa.me/${store.settings.whatsapp_number}?text=${encodeURIComponent(buildWhatsappMessage(receipt))}`} target="_blank" rel="noopener noreferrer">Abrir WhatsApp novamente</a>}
-          {checkoutTestMode && <button type="button" onClick={() => showNotice("WhatsApp indisponível no teste. Seu pedido continua registrado.", "error")}>Simular WhatsApp indisponível</button>}
+          {checkoutTestMode && <button type="button" onClick={() => setReceiptNotice("WhatsApp indisponível no teste. Seu pedido continua registrado.")}>Reabrir WhatsApp (simulação)</button>}
           <button type="button" onClick={async () => {
             try {
               await navigator.clipboard.writeText(buildWhatsappMessage(receipt));
-              showNotice("Mensagem copiada.", "success");
+              setReceiptNotice("Mensagem copiada.");
             } catch {
-              showNotice("Não foi possível copiar a mensagem.", "error");
+              setReceiptNotice("Não foi possível copiar a mensagem.");
             }
           }}>Copiar mensagem</button>
-          <button type="button" onClick={closeReceipt}>Fechar confirmação</button>
-        </section>}
+          </div>
+          <p role="status">{receiptNotice}</p>
+          <button type="button" onClick={() => receiptDialog.current.close()}>Fechar confirmação</button>
+        </dialog>}
       <header className="topbar">
         <button className="brand-button" onClick={() => setView("home")} aria-label="Início"><img src={store.settings.brand_logo_url} alt={store.settings.store_name} /></button>
         <div className="store-chip"><span className={status.open ? "pulse open" : "pulse"} /><div><strong>{status.label}</strong><small>{status.detail}</small></div></div>

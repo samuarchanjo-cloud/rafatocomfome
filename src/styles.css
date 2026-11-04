@@ -2129,3 +2129,21 @@ textarea {
     flex: 1;
   }
 }
+
+.receipt-dialog {
+  width: min(32rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  margin: auto;
+  overflow: auto;
+  color: #fff;
+  background: #161616;
+  border: 1px solid #494949;
+}
+
+.receipt-dialog::backdrop {
+  background: rgb(0 0 0 / 75%);
+}
+
+.receipt-dialog .saved-address-actions {
+  margin-top: 1rem;
+}
