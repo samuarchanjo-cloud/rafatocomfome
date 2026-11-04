@@ -927,6 +927,7 @@ function App() {
           <h2>Pedido registrado #{String(receipt.id).slice(0, 8)}</h2>
           <p>Total: {money(receipt.total)}. O envio da mensagem ainda depende de você.</p>
           {!checkoutTestMode && <a href={`https://wa.me/${store.settings.whatsapp_number}?text=${encodeURIComponent(buildWhatsappMessage(receipt))}`} target="_blank" rel="noopener noreferrer">Abrir WhatsApp novamente</a>}
+          {checkoutTestMode && <button type="button" onClick={() => showNotice("WhatsApp indisponível no teste. Seu pedido continua registrado.", "error")}>Simular WhatsApp indisponível</button>}
           <button type="button" onClick={async () => {
             try {
               await navigator.clipboard.writeText(buildWhatsappMessage(receipt));
