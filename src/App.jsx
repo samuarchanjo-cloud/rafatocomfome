@@ -1,3 +1,4 @@
+import { attemptCredential, completedAttempt, createCheckoutAttempt, readCheckoutAttempt, writeCheckoutAttempt } from "./lib/checkout-attempt";
 import { checkoutTestMode } from "./lib/supabase";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -50,6 +51,7 @@ import {
   loadStoreData,
   onAuthChange,
   placeOrder,
+  recoverOrder,
   saveCustomerAddress,
   saveCustomerProfile,
   signIn,
@@ -122,11 +124,12 @@ function friendlyOrderError(error) {
   const message = `${error?.code || ""} ${error?.message || ""} ${error?.details || ""}`;
   if (/AUTH_REQUIRED|JWT|refresh_token|session.*expired/i.test(message)) return "Sua sessão expirou ou não pôde ser validada. Entre novamente em Minha conta e volte ao checkout. Seu carrinho foi mantido.";
   if (/PGRST202|place_order_v4|SERVER_NOT_CONFIGURED/.test(message) || error?.status === 404) return "O serviço de pedidos está indisponível. Seu carrinho foi mantido. Entre em contato com a loja.";
+  if (message.includes("CHECKOUT_ATTEMPT_CONFLICT")) return "Não foi possível recuperar esta tentativa. Confirme o pedido com a loja antes de começar outro.";
   if (message.includes("INVALID_CUSTOMER")) return "Informe um nome com pelo menos 2 caracteres e telefone com pelo menos 8 dígitos.";
   if (message.includes("INVALID_ADDRESS")) return "Confira a rua e o número do endereço de entrega.";
   if (message.includes("INVALID_QUANTITY")) return "Cada produto deve ter entre 1 e 50 unidades. Revise o carrinho.";
   if (message.includes("INVALID_PAYMENT")) return "Selecione uma forma de pagamento válida.";
-  if (/ROUTING_UNAVAILABLE|Failed to fetch|FunctionsFetchError|NetworkError/i.test(message)) return "Não foi possível confirmar a resposta do serviço. Seu carrinho foi mantido. Se você já finalizou, confirme com a loja antes de enviar novamente para evitar duplicidade.";
+  if (/ROUTING_UNAVAILABLE|Failed to fetch|FunctionsFetchError|NetworkError/i.test(message)) return "Não foi possível confirmar a resposta do serviço. Use “Verificar ou retomar pedido” para consultar a mesma tentativa.";
   if (message.includes("STORE_CLOSED")) return "O estabelecimento está fechado. O pedido não foi salvo nem enviado.";
   if (message.includes("LOCATION_REQUIRED")) return "Valide o endereço de entrega antes de finalizar o pedido.";
   if (message.includes("INVALID_LOCATION_SOURCE")) return "Confirme o local de entrega antes de finalizar.";
@@ -169,6 +172,9 @@ function App() {
   const [pixCopyStatus, setPixCopyStatus] = useState("");
   const [cartAttentionActive, setCartAttentionActive] = useState(false);
   const [submittingOrder, setSubmittingOrder] = useState(false);
+  const submittingRef = useRef(false);
+  const [attempt, setAttempt] = useState(() => readCheckoutAttempt(sessionStorage));
+  const [receipt, setReceipt] = useState(null);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [account, setAccount] = useState({ profile: null, addresses: [], orders: [], setupRequired: false });
@@ -653,17 +659,17 @@ function App() {
   }
 
   function buildWhatsappMessage(order) {
-    const itemLines = order.items.map((item) => `• ${item.quantity}x ${item.name}`).join("\n");
-    const paymentLines = checkout.payment === "dinheiro"
-      ? ["Pagamento: Dinheiro", checkout.needsChange ? `Troco para: ${moneyFromInput(checkout.changeFor)}` : ""]
-      : [`💳 ${paymentLabels[checkout.payment]}`];
+    const itemLines = (order.items || order.order_items || []).map((item) => `• ${item.quantity}x ${item.name || item.product_name}`).join("\n");
+    const paymentLines = order.payment_method === "dinheiro"
+      ? ["Pagamento: Dinheiro", order.needs_change ? `Troco para: ${moneyFromInput(order.change_for)}` : ""]
+      : [`💳 ${paymentLabels[order.payment_method]}`];
     const uberLines = order.delivery_mode === "uber"
       ? [
           "🚗 MÉTODO DE ENTREGA",
           "Uber solicitado pelo cliente",
           "Cliente irá solicitar o Uber para retirada na loja.",
           "📍 DESTINO INFORMADO",
-          composeDeliveryAddress(checkout),
+          order.address || "",
           order.distance_km != null ? `Distância estimada da rota: ${Number(order.distance_km).toFixed(2)} km` : "",
           "Taxa da loja: R$ 0,00",
           "Uber pago separadamente pelo cliente.",
@@ -672,10 +678,10 @@ function App() {
     return [
       "🍔 NOVO PEDIDO",
       `Código: ${String(order.id).slice(0, 8)}`,
-      `👤 ${checkout.name}`,
-      `📞 ${checkout.phone}`,
-      order.delivery_mode !== "uber" ? `📍 ${checkout.deliveryType === "retirada" ? "Retirada no local" : composeDeliveryAddress(checkout)}` : "",
-      order.delivery_mode !== "uber" && checkout.deliveryType === "entrega" && order.distance_km != null ? `Distância da rota: ${Number(order.distance_km).toFixed(2)} km` : "",
+      `👤 ${order.customer_name}`,
+      `📞 ${order.customer_phone}`,
+      order.delivery_mode !== "uber" ? `📍 ${order.delivery_type === "retirada" ? "Retirada no local" : order.address || ""}` : "",
+      order.delivery_mode !== "uber" && order.delivery_type === "entrega" && order.distance_km != null ? `Distância da rota: ${Number(order.distance_km).toFixed(2)} km` : "",
       ...uberLines,
       "🛒 Itens",
       itemLines,
@@ -684,7 +690,7 @@ function App() {
       Number(order.card_fee) > 0 ? `Taxa do cartão: ${money(order.card_fee)}` : "",
       `💰 Total: ${money(order.total)}`,
       ...paymentLines,
-      checkout.notes ? `📝 ${checkout.notes}` : "📝 Sem observação",
+      order.notes ? `📝 ${order.notes}` : "📝 Sem observação",
     ].filter(Boolean).join("\n");
   }
 
@@ -754,7 +760,7 @@ function App() {
 
   async function finishOrder(event) {
     event.preventDefault();
-    if (submittingOrder) return;
+    if (submittingRef.current || readCheckoutAttempt(sessionStorage)?.payload) return;
     const freshStatus = getBusinessStatus(store.businessHours, new Date(), store.settings.timezone);
     if (!freshStatus.open) {
       showNotice(`Estamos fechados. Próxima abertura: ${freshStatus.nextLabel}.`, "error");
@@ -773,10 +779,11 @@ function App() {
     if (checkout.deliveryType === "entrega" && !deliveryAllowed) return showNotice(deliveryAssessment.message, "error");
     if (checkout.payment === "dinheiro" && checkout.needsChange && !checkout.changeFor.trim()) return showNotice("Informe para quanto precisa de troco.", "error");
 
+    submittingRef.current = true;
     setSubmittingOrder(true);
     try {
       const customerAddressId = await prepareCustomerForOrder();
-      const order = await placeOrder({
+      const payload = {
         customer_name: checkout.name,
         customer_phone: checkout.phone,
         address: checkout.deliveryType === "entrega" ? composeDeliveryAddress(checkout) : null,
@@ -802,26 +809,66 @@ function App() {
         location_accuracy_m: checkout.deliveryType === "entrega" ? deliveryLocation?.accuracy ?? null : null,
         location_uncertainty_m: null,
         items: cartLines.map((item) => ({ product_id: item.id, quantity: item.qty })),
-      }, { expectedUserId: session?.user?.id });
-      const url = `https://wa.me/${store.settings.whatsapp_number}?text=${encodeURIComponent(buildWhatsappMessage(order))}`;
-      setCart([]);
-      localStorage.removeItem(CHECKOUT_STORAGE_KEY);
-      setCheckout(EMPTY_CHECKOUT);
-      setDeliveryLocation(null);
-      setAccountPassword("");
-      if (checkoutTestMode) {
-        showNotice("Pedido fictício salvo.", "success");
-        return;
+      };
+      const activeSession = await getSession();
+      if (session?.user?.id && activeSession?.user?.id !== session.user.id) {
+        throw new Error("Sua sessão mudou. Entre novamente para finalizar.");
       }
-      showNotice("Pedido salvo. Abrindo o WhatsApp...", "success");
-      window.location.assign(url);
+      const next = createCheckoutAttempt(activeSession?.user?.id ?? null, payload);
+      saveAttempt(next);
+      await sendAttempt(next, { initial: true });
     } catch (error) {
       console.error("Erro ao finalizar pedido:", error);
       showNotice(friendlyOrderError(error), "error");
       void reloadStore().catch(() => {});
     } finally {
+      submittingRef.current = false;
       setSubmittingOrder(false);
     }
+  }
+
+  function saveAttempt(next) {
+    writeCheckoutAttempt(sessionStorage, next);
+    setAttempt(next);
+  }
+
+  async function sendAttempt(next, { initial = false } = {}) {
+    let order;
+    try {
+      order = await placeOrder(next.payload, { attempt: attemptCredential(next), expectedUserId: next.actorId });
+    } catch (error) {
+      // A transport failure can follow a committed order. Keep the same attempt.
+      if (initial && error.status === 400) saveAttempt(null);
+      throw error;
+    }
+    if (!order?.id) throw new Error("Não foi possível confirmar a resposta. Verifique a mesma tentativa.");
+    saveAttempt(completedAttempt(next));
+    setReceipt(order);
+    setCart([]);
+    localStorage.removeItem(CHECKOUT_STORAGE_KEY);
+    setCheckout(EMPTY_CHECKOUT);
+    setDeliveryLocation(null);
+    setAccountPassword("");
+  }
+
+  async function resumeAttempt() {
+    if (!attempt || submittingRef.current || authLoading) return;
+    submittingRef.current = true;
+    setSubmittingOrder(true);
+    try {
+      if (attempt.payload) await sendAttempt(attempt);
+      else setReceipt(await recoverOrder(attemptCredential(attempt), { expectedUserId: attempt.actorId }));
+    } catch (error) {
+      if (!attempt.payload && error.status === 404) saveAttempt(null);
+      showNotice(error.status === 404 ? "Esta confirmação não está mais disponível." : friendlyOrderError(error), "error");
+    } finally {
+      submittingRef.current = false;
+      setSubmittingOrder(false);
+    }
+  }
+
+  function closeReceipt() {
+    setReceipt(null);
   }
 
   async function loginCustomer(email, password) {
@@ -871,6 +918,25 @@ function App() {
   return (
     <div className={view === "admin" ? "app-shell admin-shell" : "app-shell"}>
       {checkoutTestMode && <p role="status">HOMOLOGAÇÃO — pedidos fictícios, sem pagamento ou entrega.</p>}
+      {!authLoading && attempt?.payload && (session?.user?.id ?? null) !== attempt.actorId &&
+        <p role="status">Volte à sessão que iniciou o pedido para verificar a tentativa pendente.</p>}
+      {!authLoading && !receipt && attempt && (session?.user?.id ?? null) === attempt.actorId &&
+        <button type="button" disabled={submittingOrder} onClick={resumeAttempt}>{attempt.payload ? "Verificar ou retomar pedido" : "Recuperar confirmação do pedido"}</button>}
+      {!authLoading && receipt && (receipt.customer_id ?? null) === (session?.user?.id ?? null) &&
+        <section className="account-card" aria-label="Confirmação do pedido">
+          <h2>Pedido registrado #{String(receipt.id).slice(0, 8)}</h2>
+          <p>Total: {money(receipt.total)}. O envio da mensagem ainda depende de você.</p>
+          {!checkoutTestMode && <a href={`https://wa.me/${store.settings.whatsapp_number}?text=${encodeURIComponent(buildWhatsappMessage(receipt))}`} target="_blank" rel="noopener noreferrer">Abrir WhatsApp novamente</a>}
+          <button type="button" onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(buildWhatsappMessage(receipt));
+              showNotice("Mensagem copiada.", "success");
+            } catch {
+              showNotice("Não foi possível copiar a mensagem.", "error");
+            }
+          }}>Copiar mensagem</button>
+          <button type="button" onClick={closeReceipt}>Fechar confirmação</button>
+        </section>}
       <header className="topbar">
         <button className="brand-button" onClick={() => setView("home")} aria-label="Início"><img src={store.settings.brand_logo_url} alt={store.settings.store_name} /></button>
         <div className="store-chip"><span className={status.open ? "pulse open" : "pulse"} /><div><strong>{status.label}</strong><small>{status.detail}</small></div></div>
@@ -892,9 +958,9 @@ function App() {
 
         {!search.trim() && view === "cart" && <CartView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} status={status} recommendations={recommendations} onOpenRecommendation={setSelectedProduct} onQty={updateQty} onRemove={(id) => setCart((current) => current.filter((item) => item.id !== id))} onCheckout={() => status.open ? setView("checkout") : showNotice(`Estamos fechados. Próxima abertura: ${status.nextLabel}.`, "error")} onBack={() => setView("home")} />}
 
-        {!search.trim() && view === "checkout" && <CheckoutView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} setCheckoutField={setCheckoutField} finishOrder={finishOrder} deliveryLocation={deliveryLocation} deliveryAssessment={deliveryAssessment} deliveryAllowed={deliveryAllowed} postalCodeStatus={postalCodeStatus} addressValidationStatus={addressValidationStatus} validateDeliveryAddress={validateDeliveryAddress} validatingAddress={validatingAddress} reviewDeliveryAddress={reviewDeliveryAddress} changeDeliveryLocation={changeDeliveryLocation} pixCopyStatus={pixCopyStatus} copyPixKey={copyPixKey} status={status} settings={store.settings} submitting={submittingOrder} session={session} addresses={account.addresses} onUseSavedAddress={useSavedAddress} onEditSavedAddress={editSavedAddress} onUseGps={useDeviceLocation} onUseManual={chooseManualAddress} gpsLoading={gpsLoading} accountPassword={accountPassword} setAccountPassword={setAccountPassword} recommendations={recommendations} onOpenRecommendation={setSelectedProduct} onBack={() => setView("cart")} />}
+        {!search.trim() && view === "checkout" && <CheckoutView cartLines={cartLines} subtotal={subtotal} deliveryFee={deliveryFee} cardFee={cardFee} isCardPayment={isCardPayment} total={total} checkout={checkout} setCheckoutField={setCheckoutField} finishOrder={finishOrder} deliveryLocation={deliveryLocation} deliveryAssessment={deliveryAssessment} deliveryAllowed={deliveryAllowed} postalCodeStatus={postalCodeStatus} addressValidationStatus={addressValidationStatus} validateDeliveryAddress={validateDeliveryAddress} validatingAddress={validatingAddress} reviewDeliveryAddress={reviewDeliveryAddress} changeDeliveryLocation={changeDeliveryLocation} pixCopyStatus={pixCopyStatus} copyPixKey={copyPixKey} status={status} settings={store.settings} submitting={submittingOrder || Boolean(attempt?.payload)} session={session} addresses={account.addresses} onUseSavedAddress={useSavedAddress} onEditSavedAddress={editSavedAddress} onUseGps={useDeviceLocation} onUseManual={chooseManualAddress} gpsLoading={gpsLoading} accountPassword={accountPassword} setAccountPassword={setAccountPassword} recommendations={recommendations} onOpenRecommendation={setSelectedProduct} onBack={() => setView("cart")} />}
 
-        {!search.trim() && view === "account" && <CustomerAccount session={session} account={account} loading={accountLoading} adminAuthorized={adminAuthorized} onBack={() => setView("home")} onLogin={loginCustomer} onSignOut={logoutAdmin} onSaveProfile={saveProfileFromAccount} onSaveAddress={saveAddressFromAccount} onDeleteAddress={removeAddressFromAccount} onUseAddress={(address) => { setView("checkout"); useSavedAddress(address); }} onRepeatOrder={repeatOrder} onNewOrder={() => setView("home")} onOpenAdmin={() => setView("admin")} />}
+        {!search.trim() && view === "account" && <CustomerAccount session={session} account={account} loading={accountLoading} adminAuthorized={adminAuthorized} onBack={() => setView("home")} onLogin={loginCustomer} onSignOut={logoutAdmin} onSaveProfile={saveProfileFromAccount} onSaveAddress={saveAddressFromAccount} onDeleteAddress={removeAddressFromAccount} onUseAddress={(address) => { setView("checkout"); useSavedAddress(address); }} onRepeatOrder={repeatOrder} onRecoverOrder={setReceipt} onNewOrder={() => setView("home")} onOpenAdmin={() => setView("admin")} />}
 
         {!search.trim() && view === "admin" && (authLoading
           ? <p className="empty">Verificando sessão...</p>

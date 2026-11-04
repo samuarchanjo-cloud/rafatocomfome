@@ -1,6 +1,6 @@
 import { supabase } from "./supabase";
 import { FALLBACK_BUSINESS_HOURS, FALLBACK_CATEGORIES, PUBLIC_FALLBACKS } from "../menuData";
-import { placeRoutedOrder, quoteDeliveryRoute as quoteRoutedDelivery } from "./routing";
+import { placeRoutedOrder, recoverRoutedOrder, quoteDeliveryRoute as quoteRoutedDelivery } from "./routing";
 
 const PRODUCTS_BUCKET = "product-images";
 
@@ -383,4 +383,8 @@ export async function placeOrder(payload, options) {
 
 export async function quoteDeliveryRoute(location) {
   return quoteRoutedDelivery(location, supabase);
+}
+
+export async function recoverOrder(attempt, options) {
+  return recoverRoutedOrder(attempt, supabase, options);
 }

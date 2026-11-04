@@ -26,7 +26,7 @@ export async function checkoutSession(client, { expectedUserId } = {}) {
     }
     session = refreshed.data.session;
   }
-  if (expectedUserId && session?.user?.id !== expectedUserId) {
+  if (expectedUserId !== undefined && (session?.user?.id ?? null) !== expectedUserId) {
     throw Object.assign(new Error("Sua sessão mudou. Entre novamente na conta antes de finalizar."), { code: "AUTH_REQUIRED" });
   }
   return session;
@@ -56,5 +56,9 @@ export async function quoteDeliveryRoute(location, client) {
 }
 
 export async function placeRoutedOrder(payload, client, options) {
-  return invokeRouting("place_order", { order: payload }, client, options);
+  return invokeRouting("place_order", { order: payload, attempt: options?.attempt }, client, options);
+}
+
+export async function recoverRoutedOrder(attempt, client, options) {
+  return invokeRouting("recover_order", { attempt }, client, options);
 }
