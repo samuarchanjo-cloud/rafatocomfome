@@ -99,6 +99,21 @@ Deno.serve(async (request) => {
       });
     }
 
+    const attempt = body?.attempt;
+    if (body?.action === "recover_order" || attempt != null) {
+      if (typeof attempt?.id !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(attempt.id)
+          || typeof attempt.secret !== "string" || !/^[a-f0-9]{64}$/.test(attempt.secret)) {
+        return response({ error: "INVALID_CHECKOUT_ATTEMPT" }, 400);
+      }
+      const { data, error } = await admin.rpc("checkout_attempt_receipt", {
+        p_id: attempt.id, p_secret: attempt.secret, p_actor: actorUserId,
+        p_order: body.action === "place_order" ? body.order || {} : null,
+      });
+      if (error) throw error;
+      if (data) return response(data);
+      if (body.action === "recover_order") return response({ error: "CHECKOUT_RECEIPT_NOT_FOUND" }, 404);
+    }
+
     if (body?.action === "place_order") {
       const order = body.order || {};
       let route = null;
@@ -110,14 +125,14 @@ Deno.serve(async (request) => {
           source: order.location_source,
         }, settings);
       }
-      const { data, error } = await admin.rpc("place_order_v4", {
+      const { data, error } = await admin.rpc(attempt ? "place_order_once" : "place_order_v4", {
         p_order: order,
         p_route: route ? {
           distance_km: route.distanceKm,
           duration_minutes: route.durationMinutes,
           source: route.source,
         } : {},
-        p_actor_user_id: actorUserId,
+        ...(attempt ? { p_id: attempt.id, p_secret: attempt.secret, p_actor: actorUserId } : { p_actor_user_id: actorUserId }),
       });
       if (error) throw error;
       return response(data);
@@ -134,6 +149,7 @@ Deno.serve(async (request) => {
       "INVALID_PAYMENT", "INVALID_DELIVERY_TYPE", "PRODUCT_UNAVAILABLE",
       "INVALID_LOCATION_ACCURACY", "CUSTOMER_ADDRESS_FORBIDDEN", "CUSTOMER_REQUIRED",
     ]);
+    if (code === "CHECKOUT_ATTEMPT_CONFLICT") return response({ error: code }, 409);
     console.error("delivery-routing:", code);
     return response({ error: code, message: code }, clientErrors.has(code) ? 400 : 500);
   }

@@ -26,15 +26,16 @@ test('F04: falha opcional no perfil não rejeita preparação de cliente cadastr
 
 test('F07: finalizar GPS salvo sem CEP chega à criação do pedido', async () => {
   let created = false;
-  const finish = method('finishOrder', 'async function loginCustomer', {
-    session: null, submittingOrder: false, getBusinessStatus: () => ({ open: true }),
+  const finish = method('finishOrder', 'function saveAttempt', {
+    session: null, readCheckoutAttempt: () => null, sessionStorage: {}, submittingRef: { current: false }, getBusinessStatus: () => ({ open: true }),
     store: { businessHours: [], settings: {} }, cartLines: [{ id: 'p', qty: 1 }],
     checkout: { deliveryType: 'entrega', locationFlow: 'saved', street: 'Rua Teste', number: '1', reference: '', notes: '' },
     deliveryLocation: { source: 'gps', locationSource: 'gps', accuracy: 10, latitude: -48, longitude: -119 },
     validateDeliveryAddressFields, isTrustedDeliveryLocation: () => true, deliveryAllowed: true,
     setSubmittingOrder() {}, prepareCustomerForOrder: async () => null,
     composeDeliveryAddress: () => 'Rua Teste, 1', postalCodeDigits: () => '',
-    placeOrder: async () => { created = true; throw new Error('stop after submission'); },
+    getSession: async () => null, createCheckoutAttempt: (_actor, payload) => ({ payload }), saveAttempt() {},
+    sendAttempt: async ({ payload }) => { assert.equal(payload.location_source, 'gps'); created = true; },
     showNotice() {}, console: { error() {} }, friendlyOrderError: () => 'test', reloadStore: async () => {},
   });
   await finish({ preventDefault() {} });
@@ -192,7 +193,7 @@ test('mensagens distinguem sessão, serviço ausente, endereço e resposta desco
   assert.match(friendly({ code: 'AUTH_REQUIRED', message: 'non-2xx' }), /Entre novamente/);
   assert.match(friendly({ code: 'PGRST202' }), /serviço de pedidos está indisponível/);
   assert.match(friendly({ code: 'CUSTOMER_ADDRESS_FORBIDDEN' }), /Selecione-o novamente/);
-  assert.match(friendly({ code: 'ROUTING_UNAVAILABLE' }), /evitar duplicidade/);
+  assert.match(friendly({ code: 'ROUTING_UNAVAILABLE' }), /Verificar ou retomar pedido/);
 });
 
 function routingClient(session, { refreshError, invokeError } = {}) {

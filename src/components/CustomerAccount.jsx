@@ -12,7 +12,7 @@ const EMPTY_ADDRESS = {
 
 export default function CustomerAccount({
   session, account, loading, adminAuthorized, onBack, onLogin, onSignOut,
-  onSaveProfile, onSaveAddress, onDeleteAddress, onUseAddress, onRepeatOrder, onNewOrder, onOpenAdmin,
+  onSaveProfile, onSaveAddress, onDeleteAddress, onUseAddress, onRepeatOrder, onRecoverOrder, onNewOrder, onOpenAdmin,
 }) {
   const [login, setLogin] = useState({ email: "", password: "" });
   const [profile, setProfile] = useState({ name: "", phone: "", email: "" });
@@ -112,7 +112,7 @@ export default function CustomerAccount({
           <small>{new Date(order.created_at).toLocaleString("pt-BR")} · {order.status || "novo"}</small>
           <p>{(order.order_items || []).map((item) => `${item.quantity}x ${item.product_name}`).join(", ")}</p>
           {openOrderId === order.id && <div className="order-details">{order.address && <small>{order.address}</small>}<small>Subtotal: {money(order.subtotal)} · Entrega: {money(order.delivery_fee)}</small><small>Pagamento: {order.payment_method}</small></div>}
-          <div className="saved-address-actions"><button type="button" onClick={() => setOpenOrderId((current) => current === order.id ? null : order.id)}>{openOrderId === order.id ? "Ocultar" : "Ver pedido"}</button><button type="button" onClick={() => onRepeatOrder(order)}><RotateCcw size={16} />Repetir pedido</button></div>
+          <div className="saved-address-actions"><button type="button" onClick={() => setOpenOrderId((current) => current === order.id ? null : order.id)}>{openOrderId === order.id ? "Ocultar" : "Ver pedido"}</button><button type="button" onClick={() => onRepeatOrder(order)}><RotateCcw size={16} />Repetir pedido</button><button type="button" onClick={() => onRecoverOrder(order)}>Recuperar mensagem</button></div>
         </article>)}
         {!account.orders.length && <p className="empty">Você ainda não possui pedidos vinculados.</p>}
       </div>

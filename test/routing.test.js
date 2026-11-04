@@ -171,7 +171,7 @@ test("postal_zone e retirada não chamam roteamento; RPC privado recalcula valor
   const placeBranch = edge.slice(edge.indexOf('if (body?.action === "place_order")'));
 
   assert.match(placeBranch, /delivery_type === "entrega" && order\.geocoding_source !== "postal_zone"[\s\S]*calculateServerRoute/);
-  assert.match(placeBranch, /admin\.rpc\("place_order_v4"/);
+  assert.match(placeBranch, /admin\.rpc\(attempt \? "place_order_once" : "place_order_v4"/);
   assert.match(migration, /if v_location_source = 'postal_zone' then[\s\S]*v_distance := null;[\s\S]*v_delivery_fee := v_delivery_area\.delivery_fee/i);
   assert.match(migration, /v_delivery_type = 'entrega'/i);
   assert.match(migration, /v_delivery_type = 'retirada'|else[\s\S]*v_delivery_mode := null/i);
