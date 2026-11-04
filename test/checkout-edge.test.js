@@ -11,7 +11,7 @@ function handler({ user, authError, rpcError } = {}) {
   const rpcCalls = [];
   const values = { SUPABASE_URL: 'https://synthetic.test', SUPABASE_SERVICE_ROLE_KEY: 'service', SUPABASE_ANON_KEY: 'anon' };
   vm.runInNewContext(source, {
-    Deno: { env: { get: name => values[name] }, serve: fn => { serve = fn; } }, Response,
+    Deno: { env: { get: name => values[name] }, serve: fn => { serve = fn; } }, Response, atob,
     console: { error() {}, warn() {} },
     createClient: (_url, key) => key === 'service' ? {
       rpc: async (name, payload) => { rpcCalls.push({ name, payload }); return { data: { id: 'order' }, error: rpcError }; },
@@ -52,4 +52,20 @@ test('Edge: erro de RPC continua sendo erro e nunca sucesso de criação', async
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error, 'CUSTOMER_ADDRESS_FORBIDDEN');
   assert.equal(rpcCalls.length, 1);
+});
+
+test('Edge: JWT anônimo aceito pelo gateway pode diferir de SUPABASE_ANON_KEY', async () => {
+  const claims = Buffer.from(JSON.stringify({ role: 'anon' })).toString('base64url');
+  const { run, rpcCalls } = handler({ authError: new Error('no user session') });
+  assert.equal((await run(`header.${claims}.signature`)).status, 200);
+  assert.equal(rpcCalls[0].payload.p_actor_user_id, null);
+});
+
+test('Edge: JWT com identidade não pode cair no fluxo anônimo', async () => {
+  for (const payload of [{ role: 'authenticated' }, { role: 'anon', sub: 'customer' }]) {
+    const claims = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const { run, rpcCalls } = handler({ authError: new Error('invalid session') });
+    assert.equal((await run(`header.${claims}.signature`)).status, 401);
+    assert.equal(rpcCalls.length, 0);
+  }
 });
