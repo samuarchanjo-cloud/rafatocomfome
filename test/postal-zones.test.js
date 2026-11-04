@@ -28,18 +28,18 @@ function resolvedRule({ id = "rule-1", deliveryFee = 3, matchType = "exact" } = 
 }
 
 test("postal_zone usa a regra resolvida sem coordenada ou distância fictícia", () => {
-  const location = createPostalZoneLocation(resolvedRule(), "23036-061");
+  const location = createPostalZoneLocation(resolvedRule(), "00000-061");
   const assessment = evaluateOrderDelivery("entrega", location, [], {});
   assert.equal(location.latitude, undefined);
   assert.equal(location.longitude, undefined);
   assert.equal(location.km, null);
-  assert.equal(location.postalCode, "23036061");
+  assert.equal(location.postalCode, "00000061");
   assert.equal(isTrustedDeliveryLocation(location), true);
   assert.deepEqual(assessment, { allowed: true, fee: 3, code: "POSTAL_ZONE", message: "Entrega disponível para o endereço informado." });
 });
 
-test("CEPs 23036-061 e 23036-076 cadastrados como exact usam postal_zone", () => {
-  for (const postalCode of ["23036-061", "23036-076"]) {
+test("CEPs 00000-061 e 00000-076 cadastrados como exact usam postal_zone", () => {
+  for (const postalCode of ["00000-061", "00000-076"]) {
     const location = createPostalZoneLocation(resolvedRule({ id: `exact-${postalCode}`, matchType: "exact" }), postalCode);
     assert.equal(location.source, "postal_zone");
     assert.equal(location.matchType, "exact");
@@ -48,11 +48,11 @@ test("CEPs 23036-061 e 23036-076 cadastrados como exact usam postal_zone", () =>
 });
 
 test("resultado administrativo inválido não vira localização confiável", () => {
-  assert.equal(createPostalZoneLocation(null, "23036-061"), null);
-  assert.equal(createPostalZoneLocation(resolvedRule({ id: "" }), "23036-061"), null);
-  assert.equal(createPostalZoneLocation(resolvedRule({ matchType: "unknown" }), "23036-061"), null);
-  assert.equal(createPostalZoneLocation(resolvedRule({ deliveryFee: -1 }), "23036-061"), null);
-  assert.equal(createPostalZoneLocation(resolvedRule({ matchType: "neighborhood" }), "23036-061"), null);
+  assert.equal(createPostalZoneLocation(null, "00000-061"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ id: "" }), "00000-061"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ matchType: "unknown" }), "00000-061"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ deliveryFee: -1 }), "00000-061"), null);
+  assert.equal(createPostalZoneLocation(resolvedRule({ matchType: "neighborhood" }), "00000-061"), null);
 });
 
 test("migration incremental converte registros atuais em exact sem apagar dados", async () => {
@@ -140,7 +140,7 @@ test("neighborhood permanece no schema e Admin, mas é ignorado pela resolução
   assert.match(resolver, /não participam da decisão financeira/i);
 });
 
-test("CEP fora das regras com neighborhood adulterado como Guaratiba continua sem entrega", async () => {
+test("CEP fora das regras com neighborhood adulterado como Bairro Alfa continua sem entrega", async () => {
   const { fixMigration, api, app } = await sources();
   const resolver = fixMigration.slice(fixMigration.indexOf("create or replace function public.resolve_delivery_area"), fixMigration.indexOf("alter table public.orders"));
   const postalBranch = fixMigration.slice(fixMigration.indexOf("if v_location_source = 'postal_zone' then"), fixMigration.indexOf("else", fixMigration.indexOf("if v_location_source = 'postal_zone' then")));
@@ -196,7 +196,7 @@ test("checkout manual sem exceção exact continua no geocoder e GPS permanece e
   const { app } = await sources();
   const validation = app.slice(app.indexOf("async function validateDeliveryAddress"), app.indexOf("function changeDeliveryLocation"));
   assert.match(validation, /error\.code === "ADDRESS_NOT_PRECISE"/);
-  assert.match(validation, /resolveDeliveryArea\(checkout\.postalCode, \{ signal:/);
+  assert.match(validation, /resolveDeliveryArea\(address\.postalCode, \{ signal:/);
   assert.ok(validation.indexOf("resolveDeliveryArea") < validation.indexOf("locateDeliveryAddress"));
   assert.match(validation, /type: "unavailable"/);
   assert.match(app, /Este endereço ainda não está disponível para entrega\./);
@@ -240,7 +240,7 @@ test("retirada, Pix, crédito e débito permanecem compatíveis", async () => {
 test("migration anterior permanece incremental e sem CEPs hardcoded", async () => {
   const { firstMigration, rulesMigration, fixMigration } = await sources();
   assert.match(firstMigration, /create table if not exists public\.delivery_postal_zones/i);
-  for (const postalCode of ["23036-061", "23036-076", "23036-060", "23036-050", "23036061", "23036076", "23036060", "23036050"]) {
+  for (const postalCode of ["00000-061", "00000-076", "00000-060", "00000-050", "00000061", "00000076", "00000060", "00000050"]) {
     assert.doesNotMatch(rulesMigration, new RegExp(postalCode));
     assert.doesNotMatch(fixMigration, new RegExp(postalCode));
   }

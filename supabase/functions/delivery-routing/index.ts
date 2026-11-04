@@ -12,6 +12,19 @@ function response(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: CORS_HEADERS });
 }
 
+function isGatewayVerifiedAnonymousJwt(bearer) {
+  // verify_jwt must remain enabled: the gateway verifies the signature before
+  // this handler uses the claims to distinguish an API credential from a session.
+  const segments = bearer.split(".");
+  if (segments.length !== 3 || segments.some(segment => !/^[A-Za-z0-9_-]+$/.test(segment))) return false;
+  try {
+    const claims = JSON.parse(atob(segments[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return claims.role === "anon" && claims.sub == null;
+  } catch {
+    return false;
+  }
+}
+
 function validLocation(location) {
   const latitude = Number(location?.latitude);
   const longitude = Number(location?.longitude);
@@ -62,13 +75,16 @@ Deno.serve(async (request) => {
     const body = await request.json();
     const bearer = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") || "";
     let actorUserId = null;
-    if (bearer && bearer !== anonKey) {
+    if (bearer !== anonKey && !isGatewayVerifiedAnonymousJwt(bearer)) {
       const authClient = createClient(supabaseUrl, anonKey, {
         auth: { autoRefreshToken: false, persistSession: false },
         global: { headers: { Authorization: `Bearer ${bearer}` } },
       });
       const { data: userData, error: userError } = await authClient.auth.getUser(bearer);
-      if (!userError) actorUserId = userData.user?.id || null;
+      if (userError || !userData.user) {
+        return response({ error: "AUTH_REQUIRED", message: "Não foi possível validar sua sessão. Entre novamente na conta." }, 401);
+      }
+      actorUserId = userData.user.id;
     }
 
     if (body?.action === "quote") {

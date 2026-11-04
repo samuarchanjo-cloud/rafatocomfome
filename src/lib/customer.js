@@ -64,3 +64,29 @@ export function checkoutDraft(checkout, deliveryLocation, view) {
   delete safeCheckout.accountPassword;
   return { checkout: safeCheckout, deliveryLocation, view: ["cart", "checkout"].includes(view) ? view : "home" };
 }
+
+export function invalidateEditedAddress(address, previous) {
+  const fields = ["street", "number", "neighborhood", "city", "state", "postcode"];
+  if (previous && fields.every((field) => String(address[field] || "").trim() === String(previous[field] || "").trim())) return address;
+  return { ...address, latitude: null, longitude: null, location_accuracy: null, location_source: "address", geocoding_source: null };
+}
+
+// Optional account writes must not indefinitely hold an otherwise valid order.
+export async function saveOptionalCheckoutAddress({ saveProfile, saveAddress }, timeoutMs = 8000) {
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      (async () => {
+        if (saveProfile) await saveProfile(controller.signal);
+        if (controller.signal.aborted) throw new Error("OPTIONAL_SAVE_TIMEOUT");
+        return saveAddress(controller.signal);
+      })(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(new Error("OPTIONAL_SAVE_TIMEOUT")); }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

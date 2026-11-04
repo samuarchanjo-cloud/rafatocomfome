@@ -133,7 +133,7 @@ export async function loadCustomerAccount() {
   };
 }
 
-export async function saveCustomerProfile(profile) {
+export async function saveCustomerProfile(profile, { signal } = {}) {
   const { data: userData, error: userError } = await supabase.auth.getUser();
   if (userError || !userData.user) throw userError || new Error("AUTH_REQUIRED");
   const payload = {
@@ -142,12 +142,14 @@ export async function saveCustomerProfile(profile) {
     phone: String(profile.phone || "").trim(),
     email: String(profile.email || userData.user.email || "").trim().toLowerCase(),
   };
-  const { data, error } = await supabase.from("customer_profiles").upsert(payload, { onConflict: "id" }).select("*").single();
+  let query = supabase.from("customer_profiles").upsert(payload, { onConflict: "id" }).select("*").single();
+  if (signal) query = query.abortSignal(signal);
+  const { data, error } = await query;
   if (error) throw error;
   return data;
 }
 
-export async function saveCustomerAddress(address) {
+export async function saveCustomerAddress(address, { signal } = {}) {
   const payload = {
     ...(address.id ? { id: address.id } : {}),
     label: String(address.label || "Casa").trim(),
@@ -166,7 +168,9 @@ export async function saveCustomerAddress(address) {
     geocoding_source: address.geocoding_source || address.geocodingSource || null,
     is_default: address.is_default !== false,
   };
-  const { data, error } = await supabase.from("customer_addresses").upsert(payload).select("*").single();
+  let query = supabase.from("customer_addresses").upsert(payload).select("*").single();
+  if (signal) query = query.abortSignal(signal);
+  const { data, error } = await query;
   if (error) throw error;
   return data;
 }
@@ -373,8 +377,8 @@ export async function removeProductImage(publicUrl) {
   if (error) throw error;
 }
 
-export async function placeOrder(payload) {
-  return placeRoutedOrder(payload, supabase);
+export async function placeOrder(payload, options) {
+  return placeRoutedOrder(payload, supabase, options);
 }
 
 export async function quoteDeliveryRoute(location) {
